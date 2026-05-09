@@ -57,7 +57,8 @@ jobs:
       - name: GN
         shell: pwsh
         run: |
-          $timestamp = [int][(Get-Date).ToUniversalTime().Subtract((Get-Date 1970-01-01)).TotalSeconds]
+          # Saubere Methode für den Unix-Timestamp in PowerShell
+          $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           
           # Erweitere Args analog zu Android (mit target_os und target_cpu)
           gn gen out/win-win32_gold `
@@ -132,7 +133,8 @@ jobs:
       - name: GN
         shell: pwsh
         run: |
-          $timestamp = [int][(Get-Date).ToUniversalTime().Subtract((Get-Date 1970-01-01)).TotalSeconds]
+          # Saubere Methode für den Unix-Timestamp in PowerShell
+          $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
           # Xbox nutzt x64 Architektur
           gn gen out/xb1_gold `
