@@ -1,0 +1,233 @@
+name: uwp_xb1_release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build Type"
+        required: true
+        default: "gold"
+        type: choice
+        options:
+          - gold
+          - debug
+
+      upload_release:
+        description: "Upload GitHub Release"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  xb1:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    env:
+      DEPOT_TOOLS_WIN_TOOLCHAIN: 0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install exact MSVC + Windows SDK
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+
+          $vsPath = & $vsWhere -latest -products * -property installationPath
+
+          if ([string]::IsNullOrWhiteSpace($vsPath)) {
+            Write-Error "Visual Studio wurde nicht gefunden!"
+            exit 1
+          }
+
+          Write-Host "Visual Studio gefunden:"
+          Write-Host $vsPath
+
+          $components = @(
+            "Microsoft.VisualStudio.Component.VC.14.34.17.4.x86.x64"
+            "Microsoft.VisualStudio.Component.Windows10SDK.18362"
+            "Microsoft.VisualStudio.ComponentGroup.UWP.VC"
+            "Microsoft.VisualStudio.Component.VC.ATL"
+          )
+
+          $args = @(
+            "modify"
+            "--installPath"
+            "`"$vsPath`""
+            "--quiet"
+            "--norestart"
+          )
+
+          foreach ($component in $components) {
+            $args += "--add"
+            $args += $component
+          }
+
+          Write-Host "Installiere benoetigte Komponenten..."
+          Write-Host ($args -join " ")
+
+          $proc = Start-Process `
+            -FilePath $vsInstaller `
+            -ArgumentList $args `
+            -Wait `
+            -PassThru
+
+          Write-Host "Installer Exit Code: $($proc.ExitCode)"
+
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Visual Studio Komponenten konnten nicht installiert werden!"
+            exit 1
+          }
+
+      - name: Setup exact MSVC environment
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          $vsPath = & $vsWhere `
+            -latest `
+            -products * `
+            -property installationPath
+
+          Write-Host "VS Pfad:"
+          Write-Host $vsPath
+
+          $msvcVersion = "14.34.31933"
+          $msvcPath = "$vsPath\VC\Tools\MSVC\$msvcVersion"
+
+          if (!(Test-Path $msvcPath)) {
+            Write-Error "MSVC $msvcVersion wurde nicht gefunden!"
+            exit 1
+          }
+
+          $sdkVersion = "10.0.18362.0"
+          $sdkPath = "C:\Program Files (x86)\Windows Kits\10\include\$sdkVersion"
+
+          if (!(Test-Path $sdkPath)) {
+            Write-Error "Windows SDK $sdkVersion wurde nicht gefunden!"
+            exit 1
+          }
+
+          Add-Content `
+            -Path $env:GITHUB_ENV `
+            -Value "VCToolsVersion=$msvcVersion"
+
+          Add-Content `
+            -Path $env:GITHUB_ENV `
+            -Value "WindowsSDKVersion=$sdkVersion"
+
+          Write-Host "MSVC 14.34.31933 gefunden"
+          Write-Host "SDK 10.0.18362.0 gefunden"
+          Write-Host "MSVC Umgebung exportiert"
+
+      - name: Verify toolchain
+        shell: pwsh
+        run: |
+          Write-Host "VCToolsVersion: $env:VCToolsVersion"
+          Write-Host "WindowsSDKVersion: $env:WindowsSDKVersion"
+
+      - name: Create output directory
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out")) {
+            New-Item -ItemType Directory -Path "out"
+          }
+
+          if (!(Test-Path "out/${{ inputs.build_type }}")) {
+            New-Item `
+              -ItemType Directory `
+              -Path "out/${{ inputs.build_type }}"
+          }
+
+      - name: Generate GN build files
+        shell: pwsh
+        run: |
+          python cobalt/build/gn.py `
+            -c ${{ inputs.build_type }}
+
+      - name: Build Cobalt
+        shell: pwsh
+        run: |
+          ninja -C out/${{ inputs.build_type }}
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (!(Test-Path "out/${{ inputs.build_type }}")) {
+            Write-Error "Build Output nicht gefunden!"
+            exit 1
+          }
+
+          Write-Host "Build erfolgreich:"
+          Get-ChildItem `
+            "out/${{ inputs.build_type }}" `
+            -Recurse
+
+      - name: Create artifact copy
+        if: success()
+        shell: pwsh
+        run: |
+          $artifactDir = "artifact_upload"
+
+          if (Test-Path $artifactDir) {
+            Remove-Item `
+              $artifactDir `
+              -Recurse `
+              -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $artifactDir
+
+          Copy-Item `
+            -Path "out/${{ inputs.build_type }}/*" `
+            -Destination $artifactDir `
+            -Recurse `
+            -Force
+
+      - name: Upload build artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobalt_xb1_${{ inputs.build_type }}
+          path: artifact_upload/**
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Create release ZIP
+        if: success() && inputs.upload_release == true
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "artifact_upload/*" `
+            -DestinationPath "cobalt_xb1_${{ inputs.build_type }}.zip"
+
+      - name: Upload GitHub Release
+        if: success() && inputs.upload_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: auto-${{ github.run_number }}
+          generate_release_notes: true
+          files: |
+            cobalt_xb1_${{ inputs.build_type }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
