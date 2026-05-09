@@ -3,81 +3,182 @@ name: Cobalt Dual-Platform Build (Xbox & Win)
 on:
   push:
     tags:
-      - 'v*' # Startet Build bei Tags wie v1.0.0
-  workflow_dispatch: # Erlaubt manuelles Starten jederzeit
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cobalt-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     name: Build ${{ matrix.platform }}
     runs-on: windows-2022
+
     strategy:
-      fail-fast: false # Wenn ein Build fehlschlägt, läuft der andere weiter
+      fail-fast: false
       matrix:
-        # Hier findet die Magie statt: Beide Plattformen laufen PARALLEL
-        platform: [xb1, win-win32]
-        config: [devel]
+        include:
+          - platform: xb1
+            config: devel
+            artifact: Cobalt-Xbox-One
+
+          - platform: win-win32
+            config: devel
+            artifact: Cobalt-Win32
 
     env:
       DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
       GYP_MSVS_VERSION: "2022"
+      PYTHONUTF8: "1"
 
     steps:
-      - name: Checkout Cobalt Fork
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           path: src
+          fetch-depth: 1
+          submodules: recursive
 
-      - name: Cache Depot Tools
+      # ------------------------------------------------------------
+      # Depot Tools Cache
+      # ------------------------------------------------------------
+      - name: Cache depot_tools
         id: cache-depot-tools
         uses: actions/cache@v4
         with:
           path: depot_tools
-          key: ${{ runner.os }}-depot-tools
+          key: windows-depot-tools-v1
 
-      - name: Setup Environment
+      # ------------------------------------------------------------
+      # Install Dependencies
+      # ------------------------------------------------------------
+      - name: Setup Build Environment
+        shell: pwsh
         run: |
-          if ("${{ steps.cache-depot-tools.outputs.cache-hit }}" -ne "true") {
-            git clone https://googlesource.com
-          }
-          echo "$pwd/depot_tools" >> $env:GITHUB_PATH
           choco install ninja winflexbison3 -y
-        shell: pwsh
 
-      - name: GClient Sync (Parallel Cached)
-        run: |
-          cd src
-          gclient config --spec 'solutions = [{ "name": "src", "url": "${{ github.server_url }}/${{ github.repository }}.git", "managed": False, "custom_deps": {}, "safesync_url": "" }]'
-          gclient sync --force --nohooks --no-history --shallow
-        shell: pwsh
-
-      - name: Build Cobalt
-        run: |
-          cd src
-          python cobalt/build/gn.py -p ${{ matrix.platform }} -c ${{ matrix.config }}
-          ninja -C out/${{ matrix.platform }}_${{ matrix.config }} cobalt
-        shell: pwsh
-
-      - name: Package Apps
-        run: |
-          cd src
-          mkdir out/final_package
-          if ("${{ matrix.platform }}" -eq "xb1") {
-            python starboard/xb1/tools/packager.py -s out/xb1_devel/ -o out/final_package -p cobalt
-          } else {
-            xcopy /E /I out/win-win32_devel out/final_package
+          if (!(Test-Path "depot_tools")) {
+            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
           }
-        shell: pwsh
 
-      - name: Upload Artifacts
+          "$pwd\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # ------------------------------------------------------------
+      # Python Setup
+      # ------------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ------------------------------------------------------------
+      # GClient Sync
+      # ------------------------------------------------------------
+      - name: Configure gclient
+        shell: pwsh
+        working-directory: src
+        run: |
+          gclient config --name src `
+            --unmanaged `
+            "${{ github.server_url }}/${{ github.repository }}.git"
+
+      - name: Sync Dependencies
+        shell: pwsh
+        working-directory: src
+        run: |
+          gclient sync `
+            --force `
+            --with_branch_heads `
+            --with_tags `
+            --shallow `
+            --no-history
+
+      # ------------------------------------------------------------
+      # Generate Build Files
+      # ------------------------------------------------------------
+      - name: Generate GN Files
+        shell: pwsh
+        working-directory: src
+        run: |
+          python cobalt/build/gn.py `
+            -p ${{ matrix.platform }} `
+            -c ${{ matrix.config }}
+
+      # ------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------
+      - name: Build Cobalt
+        shell: pwsh
+        working-directory: src
+        run: |
+          ninja `
+            -C out/${{ matrix.platform }}_${{ matrix.config }} `
+            cobalt `
+            -j 4
+
+      # ------------------------------------------------------------
+      # Package
+      # ------------------------------------------------------------
+      - name: Package Build
+        shell: pwsh
+        working-directory: src
+        run: |
+          New-Item -ItemType Directory -Force -Path out/final_package | Out-Null
+
+          if ("${{ matrix.platform }}" -eq "xb1") {
+
+            python starboard/xb1/tools/packager.py `
+              -s out/xb1_devel `
+              -o out/final_package `
+              -p cobalt
+
+          } else {
+
+            Copy-Item `
+              -Path out/win-win32_devel/* `
+              -Destination out/final_package `
+              -Recurse `
+              -Force
+
+          }
+
+      # ------------------------------------------------------------
+      # Compress Artifact
+      # ------------------------------------------------------------
+      - name: Create ZIP
+        shell: pwsh
+        working-directory: src
+        run: |
+          Compress-Archive `
+            -Path out/final_package/* `
+            -DestinationPath out/${{ matrix.artifact }}.zip `
+            -Force
+
+      # ------------------------------------------------------------
+      # Upload Artifact
+      # ------------------------------------------------------------
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Cobalt-${{ matrix.platform }}
-          path: src/out/final_package/
+          name: ${{ matrix.artifact }}
+          path: src/out/${{ matrix.artifact }}.zip
+          compression-level: 0
 
-      - name: Create Release (Optional)
+      # ------------------------------------------------------------
+      # GitHub Release Upload
+      # ------------------------------------------------------------
+      - name: Upload Release Asset
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: src/out/final_package/*
+          files: |
+            src/out/${{ matrix.artifact }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
