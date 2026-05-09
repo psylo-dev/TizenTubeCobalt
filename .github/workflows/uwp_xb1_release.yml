@@ -33,8 +33,7 @@ jobs:
 
       - name: Install Python requirements
         shell: pwsh
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -42,19 +41,16 @@ jobs:
       - name: Setup MSVC environment
         shell: pwsh
         run: |
-          # Finde die tatsächlich installierte VS-Version dynamisch
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           Write-Host "VS gefunden: $vsPath"
-
-          # Initialisiere vcvars64 und exportiere alle Env-Vars für folgende Steps
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
           $envOutput = cmd /c "`"$vcvars`" && set"
           foreach ($line in $envOutput) {
             if ($line -match '^([^=]+)=(.*)$') {
-              $name = $matches[1]
-              $value = $matches[2]
-              echo "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              $n = $matches[1]
+              $v = $matches[2]
+              Add-Content -Path $env:GITHUB_ENV -Value "$n=$v"
             }
           }
           Write-Host "MSVC Umgebung exportiert"
@@ -76,8 +72,7 @@ jobs:
 
       - name: Add GN to PATH
         shell: pwsh
-        run: |
-          echo "C:\tools\gn" | Out-File -FilePath $env:GITHUB_PATH -Append
+        run: Add-Content -Path $env:GITHUB_PATH -Value "C:\tools\gn"
 
       - name: Cache NASM
         id: cache-nasm
@@ -89,21 +84,19 @@ jobs:
       - name: Install build dependencies
         if: steps.cache-nasm.outputs.cache-hit != 'true'
         shell: pwsh
-        run: |
-          choco install -y nasm
+        run: choco install -y nasm
 
       - name: Add NASM to PATH
         shell: pwsh
         run: |
-          $nasmPath = Get-ChildItem "C:\ProgramData\chocolatey\lib\nasm" -Recurse -Filter "nasm.exe" |
-            Select-Object -First 1 -ExpandProperty DirectoryName
-          echo "$nasmPath" | Out-File -FilePath $env:GITHUB_PATH -Append
+          $nasmExe = Get-ChildItem "C:\ProgramData\chocolatey\lib\nasm" -Recurse -Filter "nasm.exe" | Select-Object -First 1
+          Add-Content -Path $env:GITHUB_PATH -Value $nasmExe.DirectoryName
 
       - name: Set Environment Variables
         shell: pwsh
         run: |
-          echo "BUILD_TYPE=${{ inputs.build_type }}" | Out-File -FilePath $env:GITHUB_ENV -Append
-          echo "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Add-Content -Path $env:GITHUB_ENV -Value "BUILD_TYPE=${{ inputs.build_type }}"
+          Add-Content -Path $env:GITHUB_ENV -Value "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}"
 
       - name: Fix ucrtbased.dll path (debug only)
         if: inputs.build_type == 'debug'
@@ -116,7 +109,7 @@ jobs:
           $dst = "C:\Program Files (x86)\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.UniversalCRT.Debug\$sdkVer\Redist\Debug\x64\ucrtbased.dll"
           New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
           Copy-Item -Path $src -Destination $dst -Force
-          Write-Host "ucrtbased.dll kopiert: $src -> $dst"
+          Write-Host "Kopiert: $src -> $dst"
 
       - name: Download resources
         shell: pwsh
@@ -136,96 +129,21 @@ jobs:
         shell: pwsh
         run: |
           $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-          python cobalt/build/gn.py `
-            -p xb1 `
-            -c ${{ inputs.build_type }} `
-            -o ${{ env.OUTPUT_DIR }}
+          python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
           gn check ${{ env.OUTPUT_DIR }}
 
       - name: Build Cobalt
         shell: pwsh
         run: |
           $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-          $env:NINJA_STATUS = "[%e sec | %f/%t %u remaining | %c/sec | j%r] "
+          $env:NINJA_STATUS = '[%e sec | %f/%t %u remaining | %c/sec | j%r] '
           ninja -C ${{ env.OUTPUT_DIR }} cobalt_install
 
       - name: Package Appx
         shell: pwsh
         run: |
           $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-          python starboard/xb1/tools/packager.py `
-            -s ${{ env.OUTPUT_DIR }}/ `
-            -o ${{ env.OUTPUT_DIR }}/package `
-            -p cobalt
-
-      - name: Verify Appx exists
-        shell: pwsh
-        run: |
-          $appx = Get-ChildItem -Path "${{ env.OUTPUT_DIR }}/package" -Filter "*.appx" -ErrorAction SilentlyContinue
-          if (-not $appx) {
-            Write-Error "Kein .appx gefunden in ${{ env.OUTPUT_DIR }}/package"
-            exit 1
-          }
-          Write-Host "Gefunden: $($appx.FullName)"
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: cobalt-xb1-${{ inputs.build_type }}
-          path: |
-            ${{ env.OUTPUT_DIR }}/cobalt*
-            ${{ env.OUTPUT_DIR }}/package/**/*
-
-      - name: Upload to GitHub Release
-        if: inputs.upload_release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ${{ env.OUTPUT_DIR }}/package/*.appx
-          file_glob: true
-          asset_name: cobalt-xb1-${{ inputs.build_type }}.appx
-          tag: ${{ github.ref_type == 'tag' && github.ref_name || 'manual-build' }}
-          overwrite: true          Write-Host "Kopiert nach: $dst"
-
-      - name: Download resources
-        shell: pwsh
-        run: |
-          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-          python download_resources.py
-
-      - name: Cache Ninja build output
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.OUTPUT_DIR }}
-          key: ninja-xb1-${{ inputs.build_type }}-${{ hashFiles('**/*.gn', '**/*.gni', 'DEPS') }}
-          restore-keys: |
-            ninja-xb1-${{ inputs.build_type }}-
-
-      - name: GN Gen
-        shell: pwsh
-        run: |
-          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-          python cobalt/build/gn.py `
-            -p xb1 `
-            -c ${{ inputs.build_type }} `
-            -o ${{ env.OUTPUT_DIR }}
-          gn check ${{ env.OUTPUT_DIR }}
-
-      - name: Build Cobalt
-        shell: pwsh
-        run: |
-          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-          $env:NINJA_STATUS = "[%e sec | %f/%t %u remaining | %c/sec | j%r] "
-          ninja -C ${{ env.OUTPUT_DIR }} cobalt_install
-
-      - name: Package Appx
-        shell: pwsh
-        run: |
-          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-          python starboard/xb1/tools/packager.py `
-            -s ${{ env.OUTPUT_DIR }}/ `
-            -o ${{ env.OUTPUT_DIR }}/package `
-            -p cobalt
+          python starboard/xb1/tools/packager.py -s ${{ env.OUTPUT_DIR }}/ -o ${{ env.OUTPUT_DIR }}/package -p cobalt
 
       - name: Verify Appx exists
         shell: pwsh
