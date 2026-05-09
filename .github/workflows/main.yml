@@ -20,7 +20,6 @@ on:
 jobs:
   xb1:
     runs-on: windows-latest
-    timeout-minutes: 160
 
     steps:
       - name: Checkout
@@ -35,7 +34,7 @@ jobs:
         shell: pwsh
         run: pip install -r requirements.txt
 
-      - name: Install required MSVC and Windows SDK versions
+      - name: Install all required VS2022 Components
         shell: pwsh
         run: |
           $ProgramFiles86 = ${env:ProgramFiles(x86)}
@@ -51,18 +50,22 @@ jobs:
           Write-Host "VS Installation Path: $vsPath"
 
           $components = @(
-            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
             "Microsoft.VisualStudio.Component.VC.14.34.17.4.x86.x64",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "Microsoft.VisualStudio.Component.VC.Llvm.Clang",
+            "Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset",
+            "Microsoft.VisualStudio.Component.Windows10SDK.18362",
             "Microsoft.VisualStudio.Component.Windows11SDK.26100",
             "Microsoft.VisualStudio.Component.Windows11SDK.22621",
             "Microsoft.VisualStudio.Component.Windows10SDK.20348",
-            "Microsoft.VisualStudio.Component.Windows10SDK.18362",
             "Microsoft.VisualStudio.ComponentGroup.UWP.VC",
-            "Microsoft.VisualStudio.Component.VC.ATL"
+            "Microsoft.VisualStudio.Component.VC.ATL",
+            "Microsoft.VisualStudio.Workload.NativeDesktop"
           )
 
           $addArgs = ($components | ForEach-Object { "--add $_" }) -join " "
-          Write-Host "Installiere Komponenten: $addArgs"
+          Write-Host "Installiere alle benötigten Komponenten:"
+          Write-Host $addArgs
 
           $proc = Start-Process -FilePath $vsInstaller `
             -ArgumentList "modify --installPath `"$vsPath`" $addArgs --quiet --norestart --wait" `
@@ -84,7 +87,7 @@ jobs:
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           Write-Host "VS Path: $vsPath"
 
-          # MSVC
+          # MSVC 14.34 priorisieren
           $msvcPath = "$vsPath\VC\Tools\MSVC\14.34.31933"
           if (Test-Path $msvcPath) {
             Write-Host "MSVC 14.34.31933 wird verwendet"
@@ -95,7 +98,7 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=$latest"
           }
 
-          # SDK
+          # SDK 10.0.26100 priorisieren
           $preferredSdk = "10.0.26100.0"
           if (Test-Path "C:\Program Files (x86)\Windows Kits\10\include\$preferredSdk") {
             Write-Host "SDK $preferredSdk wird verwendet"
@@ -107,7 +110,6 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$latestSdk"
           }
 
-          # vcvars laden
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
           $envOutput = cmd /c "`"$vcvars`" && set"
           foreach ($line in $envOutput) {
@@ -137,15 +139,7 @@ jobs:
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value "C:\tools\gn"
 
-      - name: Cache NASM
-        id: cache-nasm
-        uses: actions/cache@v4
-        with:
-          path: C:\ProgramData\chocolatey\lib\nasm
-          key: nasm-choco-windows
-
       - name: Install NASM
-        if: steps.cache-nasm.outputs.cache-hit != 'true'
         shell: pwsh
         run: choco install -y nasm
 
@@ -161,20 +155,10 @@ jobs:
           Add-Content -Path \( env:GITHUB_ENV -Value "BUILD_TYPE= \){{ inputs.build_type }}"
           Add-Content -Path \( env:GITHUB_ENV -Value "OUTPUT_DIR=out/xb1_ \){{ inputs.build_type }}"
 
-      - name: Fix ucrtbased.dll (debug only)
-        if: inputs.build_type == 'debug'
-        shell: pwsh
-        run: |
-          $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
-          $src = "C:\Program Files (x86)\Windows Kits\10\bin\$sdkVer\x64\ucrt\ucrtbased.dll"
-          $dst = "C:\Program Files (x86)\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.UniversalCRT.Debug\$sdkVer\Redist\Debug\x64\ucrtbased.dll"
-          New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
-          Copy-Item -Path $src -Destination $dst -Force
-
       - name: Download resources
         shell: pwsh
         run: |
-          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH"
+          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH}"
           python download_resources.py
 
       - name: GN Gen
