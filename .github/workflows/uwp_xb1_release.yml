@@ -1,8 +1,7 @@
 name: uwp_xb1_release
 
-# Manuell auslösbar + optional bei Tags
 on:
-  workflow_dispatch:      # ← Ermöglicht manuellen Start
+  workflow_dispatch:
     inputs:
       build_type:
         description: 'Build Type (gold oder debug)'
@@ -18,13 +17,10 @@ on:
         default: false
         type: boolean
 
-  # push:
-  #   tags:
-  #     - 'v*'
-
 jobs:
   xb1:
     runs-on: windows-latest
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -35,62 +31,84 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
       - name: Install GN
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path "C:\tools\gn" | Out-Null
           Invoke-WebRequest -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" -OutFile "gn.zip"
-          Expand-Archive -Path "gn.zip" -DestinationPath "gn_bin" -Force
-          Move-Item -Path "gn_bin/gn.exe" -Destination "C:\Program Files\gn.exe" -Force
-          echo "C:\Program Files" | Out-File -FilePath $env:GITHUB_PATH -Append
-
-      - name: Set PYTHONPATH
-        shell: pwsh
-        run: |
-          echo "PYTHONPATH=$env:GITHUB_WORKSPACE;$env:PYTHONPATH" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: GN Gen
-        shell: pwsh
-        run: |
-          \( buildType = " \){{ inputs.build_type }}"
-          gn gen out/xb1_\( {buildType} --args="target_platform=`"xb1`" target_os=`"winuwp`" target_cpu=`"x64`" build_type=`" \){buildType}`""
-          gn check out/xb1_${buildType}
+          Expand-Archive -Path "gn.zip" -DestinationPath "C:\tools\gn" -Force
+          echo "C:\tools\gn" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install build dependencies
         shell: pwsh
         run: |
           choco install -y nasm
-          # Weitere Tools bei Bedarf hinzufügen
+          refreshenv
+
+      - name: Set Environment Variables
+        shell: pwsh
+        run: |
+          echo "BUILD_TYPE=${{ inputs.build_type }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Cache Ninja build output
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OUTPUT_DIR }}
+          key: ninja-xb1-${{ inputs.build_type }}-${{ hashFiles('**/*.gn', '**/*.gni', 'DEPS') }}
+          restore-keys: |
+            ninja-xb1-${{ inputs.build_type }}-
+
+      - name: GN Gen
+        shell: pwsh
+        run: |
+          gn gen ${{ env.OUTPUT_DIR }} `
+            --args="target_platform=`"xb1`" target_os=`"winuwp`" target_cpu=`"x64`" build_type=`"${{ inputs.build_type }}`""
+
+          gn check ${{ env.OUTPUT_DIR }}
 
       - name: Build Cobalt
         shell: pwsh
         run: |
-          \( buildType = " \){{ inputs.build_type }}"
           $env:NINJA_STATUS = "[%e sec | %f/%t %u remaining | %c/sec | j%r] "
-          ninja -C out/xb1_${buildType} cobalt_install
+          ninja -C ${{ env.OUTPUT_DIR }} cobalt_install
 
       - name: Package Appx
         shell: pwsh
         run: |
-          \( buildType = " \){{ inputs.build_type }}"
           python starboard/xb1/tools/packager.py `
-            -s out/xb1_${buildType}/ `
-            -o out/xb1_${buildType}/package `
+            -s ${{ env.OUTPUT_DIR }}/ `
+            -o ${{ env.OUTPUT_DIR }}/package `
             -p cobalt
+
+      - name: Verify Appx exists
+        shell: pwsh
+        run: |
+          $appx = Get-ChildItem -Path "${{ env.OUTPUT_DIR }}/package" -Filter "*.appx" -ErrorAction SilentlyContinue
+          if (-not $appx) {
+            Write-Error "Kein .appx gefunden in ${{ env.OUTPUT_DIR }}/package"
+            exit 1
+          }
+          Write-Host "Gefunden: $($appx.FullName)"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: cobalt-xb1-${{ inputs.build_type }}
           path: |
-            out/xb1_${{ inputs.build_type }}/cobalt*
-            out/xb1_${{ inputs.build_type }}/package/**/*
+            ${{ env.OUTPUT_DIR }}/cobalt*
+            ${{ env.OUTPUT_DIR }}/package/**/*
 
       - name: Upload to GitHub Release
         if: inputs.upload_release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: out/xb1_${{ inputs.build_type }}/package/*.appx
+          file: ${{ env.OUTPUT_DIR }}/package/*.appx
+          file_glob: true
           asset_name: cobalt-xb1-${{ inputs.build_type }}.appx
-          tag: ${{ github.ref_name || 'manual-build' }}
+          tag: ${{ github.ref_type == 'tag' && github.ref_name || 'manual-build' }}
           overwrite: true
