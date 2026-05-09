@@ -38,23 +38,91 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Install required MSVC and Windows SDK versions
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $vsPath = & $vsWhere -latest -products * -property installationPath
+
+          Write-Host "VS Installation: $vsPath"
+
+          # Installiere alle benoetigten MSVC + WinSDK Versionen die Cobalt/xb1 braucht
+          $components = @(
+            # MSVC Toolchains
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",         # Aktuell (standard)
+            "Microsoft.VisualStudio.Component.VC.v141.x86.x64",          # VS 2017 (v141)
+            "Microsoft.VisualStudio.Component.VC.14.34.17.4.x86.x64",    # 14.34 (exakt was GN erwartet)
+
+            # Windows SDKs
+            "Microsoft.VisualStudio.Component.Windows10SDK.18362",        # 10.0.18362 (was GN einbaut)
+            "Microsoft.VisualStudio.Component.Windows10SDK.19041",        # 10.0.19041
+            "Microsoft.VisualStudio.Component.Windows10SDK.20348",        # 10.0.20348
+            "Microsoft.VisualStudio.Component.Windows11SDK.22000",        # 11 SDK 22000
+
+            # UWP Support
+            "Microsoft.VisualStudio.ComponentGroup.UWP.VC",               # UWP C++ Workload
+            "Microsoft.VisualStudio.Component.VC.ATL"                     # ATL fuer UWP
+          )
+
+          $addArgs = $components | ForEach-Object { "--add $_" }
+          $argString = $addArgs -join " "
+
+          Write-Host "Installiere Komponenten: $argString"
+
+          $proc = Start-Process -FilePath $vsInstaller -ArgumentList "modify --installPath `"$vsPath`" $argString --quiet --norestart" -Wait -PassThru
+          Write-Host "VS Installer Exit Code: $($proc.ExitCode)"
+
+          # Verifiziere MSVC 14.34 Installation
+          $msvcBase = "$vsPath\VC\Tools\MSVC"
+          Write-Host "Installierte MSVC Versionen:"
+          Get-ChildItem $msvcBase -Directory | Select-Object Name
+
+          # Verifiziere Windows SDKs
+          Write-Host "Installierte Windows SDKs:"
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\include" -Directory | Select-Object Name
+
       - name: Setup MSVC environment
         shell: pwsh
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           Write-Host "VS gefunden: $vsPath"
+
+          # Pruefe ob MSVC 14.34 vorhanden, sonst neueste nehmen
+          $msvc1434 = "$vsPath\VC\Tools\MSVC\14.34.31933"
+          if (Test-Path $msvc1434) {
+            Write-Host "MSVC 14.34.31933 gefunden, setze VCToolsVersion"
+            Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=14.34.31933"
+          } else {
+            $latest = (Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
+            Write-Host "MSVC 14.34 nicht gefunden, verwende: $latest"
+            Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=$latest"
+          }
+
+          # Setze WinSDK auf 10.0.18362 falls vorhanden, sonst neueste
+          $preferredSdk = "10.0.18362.0"
+          $sdkPath = "C:\Program Files (x86)\Windows Kits\10\include\$preferredSdk"
+          if (Test-Path $sdkPath) {
+            Write-Host "SDK $preferredSdk gefunden"
+            Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$preferredSdk"
+          } else {
+            $latestSdk = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\include" -Directory |
+              Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+              Sort-Object Name -Descending | Select-Object -First 1).Name
+            Write-Host "SDK $preferredSdk nicht gefunden, verwende: $latestSdk"
+            Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$latestSdk"
+          }
+
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
           $envOutput = cmd /c "`"$vcvars`" && set"
           foreach ($line in $envOutput) {
             if ($line -match '^([^=]+)=(.*)$') {
-              $n = $matches[1]
-              $v = $matches[2]
-              Add-Content -Path $env:GITHUB_ENV -Value "$n=$v"
+              Add-Content -Path $env:GITHUB_ENV -Value "$($matches[1])=$($matches[2])"
             }
           }
           Write-Host "MSVC Umgebung exportiert"
-
+          
       - name: Cache GN binary
         id: cache-gn
         uses: actions/cache@v4
