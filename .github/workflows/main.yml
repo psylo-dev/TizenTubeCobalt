@@ -64,20 +64,13 @@ jobs:
           )
 
           $addArgs = ($components | ForEach-Object { "--add $_" }) -join " "
-          Write-Host "Installiere alle benötigten Komponenten:"
-          Write-Host $addArgs
-
+          Write-Host "Installiere Komponenten..."
+          
           $proc = Start-Process -FilePath $vsInstaller `
             -ArgumentList "modify --installPath `"$vsPath`" $addArgs --quiet --norestart --wait" `
             -Wait -PassThru
 
-          Write-Host "VS Installer Exit Code: $($proc.ExitCode)"
-
-          Write-Host "`n=== Installierte MSVC Versionen ==="
-          Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Select-Object Name
-
-          Write-Host "`n=== Installierte Windows SDKs ==="
-          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\include" -Directory | Select-Object Name
+          Write-Host "VS Installer Exit Code: $($proc.ExitCode) (87 ist oft akzeptabel)"
 
       - name: Setup MSVC + SDK Environment
         shell: pwsh
@@ -87,7 +80,7 @@ jobs:
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           Write-Host "VS Path: $vsPath"
 
-          # MSVC 14.34 priorisieren
+          # MSVC Version
           $msvcPath = "$vsPath\VC\Tools\MSVC\14.34.31933"
           if (Test-Path $msvcPath) {
             Write-Host "MSVC 14.34.31933 wird verwendet"
@@ -98,7 +91,7 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=$latest"
           }
 
-          # SDK 10.0.26100 priorisieren
+          # SDK Version
           $preferredSdk = "10.0.26100.0"
           if (Test-Path "C:\Program Files (x86)\Windows Kits\10\include\$preferredSdk") {
             Write-Host "SDK $preferredSdk wird verwendet"
@@ -110,12 +103,17 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$latestSdk"
           }
 
+          # vcvars64.bat ausführen und Environment übernehmen
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
+          Write-Host "Lade vcvars64.bat ..."
           $envOutput = cmd /c "`"$vcvars`" && set"
+          
           foreach ($line in $envOutput) {
             if (\( line -match '^([^=]+)=(.*) \)') {
-              [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
-              Add-Content -Path \( env:GITHUB_ENV -Value " \)(\( matches[1])= \)($matches[2])"
+              $name = $matches[1]
+              $value = $matches[2]
+              [System.Environment]::SetEnvironmentVariable($name, $value, "Process")
+              Add-Content -Path $env:GITHUB_ENV -Value "$name=$value"
             }
           }
           Write-Host "MSVC + SDK Umgebung erfolgreich gesetzt."
