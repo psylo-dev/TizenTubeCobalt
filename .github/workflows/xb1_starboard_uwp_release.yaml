@@ -50,7 +50,10 @@ jobs:
           if (!(Test-Path "depot_tools")) {
             git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
           }
-
+          
+          # NEW: Bootstrap depot_tools to create the missing .txt files and fetch internal python
+          cmd /c "depot_tools\update_depot_tools.bat"
+          
           "$pwd\depot_tools" | Out-File `
             -FilePath $env:GITHUB_PATH `
             -Encoding utf8 `
