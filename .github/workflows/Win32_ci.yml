@@ -29,26 +29,25 @@ jobs:
 
     env:
       PYTHONPATH: ${{ github.workspace }}
-      WindowsSdkDir: C:\Program Files (x86)\Windows Kits\10\
 
     steps:
       - uses: actions/checkout@v4
 
       # -------------------------
-      # PYTHON VENV
+      # PYTHON
       # -------------------------
-      - name: Create venv
+      - name: Setup Python env
         shell: pwsh
         run: py -3 -m venv .venv
 
-      - name: Install deps
+      - name: Install dependencies
         shell: pwsh
         run: |
           .\.venv\Scripts\python.exe -m pip install --upgrade pip
           .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
       # -------------------------
-      # GN FIX (CRITICAL)
+      # GN (FIXED)
       # -------------------------
       - name: Install GN
         shell: pwsh
@@ -63,7 +62,8 @@ jobs:
             Expand-Archive gn.zip C:\tools\gn -Force
           }
 
-          echo "C:\tools\gn" >> $env:GITHUB_PATH
+          Add-Content $env:GITHUB_PATH "C:\tools\gn"
+
           & "C:\tools\gn\gn.exe" --version
 
       # -------------------------
@@ -74,49 +74,28 @@ jobs:
         run: |
           choco install winflexbison -y --no-progress
 
-          $paths = @(
-            "C:\ProgramData\chocolatey\bin",
-            "C:\ProgramData\chocolatey\lib\winflexbison\tools"
-          )
-
-          foreach ($p in $paths) {
-            if (Test-Path $p) {
-              Add-Content $env:GITHUB_PATH $p
-            }
-          }
+          Add-Content $env:GITHUB_PATH "C:\ProgramData\chocolatey\bin"
 
       # -------------------------
-      # MSVC FIX (CRITICAL)
+      # MSVC (ROBUST FIX)
       # -------------------------
       - name: Setup MSVC (FIXED)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # -------------------------
+      # CLEAN
+      # -------------------------
+      - name: Clean build
         shell: pwsh
-        run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-
-          $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
-
-          cmd /c "`"$vcvars`" && set" | ForEach-Object {
-            if ($_ -match "^([^=]+)=(.*)$") {
-              Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])"
-            }
-          }
-
-          where.exe cl
+        run: Remove-Item out/win32 -Recurse -Force -ErrorAction SilentlyContinue
 
       # -------------------------
-      # CLEAN BUILD
+      # BUILD
       # -------------------------
-      - name: Clean
-        shell: pwsh
-        run: |
-          Remove-Item out/win32 -Recurse -Force -ErrorAction SilentlyContinue
-
-      # -------------------------
-      # BUILD WIN32
-      # -------------------------
-      - name: GN gen win32
-        run: .\.venv\Scripts\python.exe cobalt/build/gn.py -p win32 -c ${{ inputs.build_type }} -o out/win32
+      - name: GN generate win32
+        run: .\.venv\Scripts\python.exe cobalt/build/gn.py -p win-win32 -c ${{ inputs.build_type }} -o out/win32
 
       - name: Build win32
         run: ninja -C out/win32 cobalt_install
@@ -136,26 +115,25 @@ jobs:
 
     env:
       PYTHONPATH: ${{ github.workspace }}
-      WindowsSdkDir: C:\Program Files (x86)\Windows Kits\10\
 
     steps:
       - uses: actions/checkout@v4
 
       # -------------------------
-      # PYTHON VENV
+      # PYTHON
       # -------------------------
-      - name: Create venv
+      - name: Setup Python env
         shell: pwsh
         run: py -3 -m venv .venv
 
-      - name: Install deps
+      - name: Install dependencies
         shell: pwsh
         run: |
           .\.venv\Scripts\python.exe -m pip install --upgrade pip
           .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
       # -------------------------
-      # GN FIX
+      # GN
       # -------------------------
       - name: Install GN
         shell: pwsh
@@ -170,7 +148,7 @@ jobs:
             Expand-Archive gn.zip C:\tools\gn -Force
           }
 
-          echo "C:\tools\gn" >> $env:GITHUB_PATH
+          Add-Content $env:GITHUB_PATH "C:\tools\gn"
           & "C:\tools\gn\gn.exe" --version
 
       # -------------------------
@@ -178,51 +156,27 @@ jobs:
       # -------------------------
       - name: Install win_bison
         shell: pwsh
-        run: |
-          choco install winflexbison -y --no-progress
-
-          $paths = @(
-            "C:\ProgramData\chocolatey\bin",
-            "C:\ProgramData\chocolatey\lib\winflexbison\tools"
-          )
-
-          foreach ($p in $paths) {
-            if (Test-Path $p) {
-              Add-Content $env:GITHUB_PATH $p
-            }
-          }
+        run: choco install winflexbison -y --no-progress
 
       # -------------------------
-      # MSVC FIX
+      # MSVC FIX (ROBUST)
       # -------------------------
-      - name: Setup MSVC (FIXED)
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # -------------------------
+      # CLEAN
+      # -------------------------
+      - name: Clean build
         shell: pwsh
-        run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-
-          $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
-
-          cmd /c "`"$vcvars`" && set" | ForEach-Object {
-            if ($_ -match "^([^=]+)=(.*)$") {
-              Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])"
-            }
-          }
-
-          where.exe cl
-
-      # -------------------------
-      # CLEAN BUILD
-      # -------------------------
-      - name: Clean
-        shell: pwsh
-        run: |
-          Remove-Item out/xb1 -Recurse -Force -ErrorAction SilentlyContinue
+        run: Remove-Item out/xb1 -Recurse -Force -ErrorAction SilentlyContinue
 
       # -------------------------
       # BUILD XB1
       # -------------------------
-      - name: GN gen xb1
+      - name: GN generate xb1
         run: .\.venv\Scripts\python.exe cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o out/xb1
 
       - name: Build xb1
@@ -236,7 +190,7 @@ jobs:
 
 
 # =========================
-# RELEASE
+# RELEASE MERGE
 # =========================
   release:
     needs: [win32, xb1]
