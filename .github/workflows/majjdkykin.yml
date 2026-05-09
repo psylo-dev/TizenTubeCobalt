@@ -1,0 +1,86 @@
+name: xb1_build
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      nightly:
+        type: boolean
+        default: false
+        required: false
+
+env:
+  IS_CI: 1
+  LANG: en_US.UTF-8
+  NINJA_STATUS: '[%e sec | %f/%t %u remaining | %c/sec | j%r]'
+
+concurrency:
+  group: xb1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [devel, debug, qa, gold]
+
+    steps:
+      - name: Checkout Cobalt
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        shell: powershell
+        run: |
+          choco install ninja python git -y
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install GN (if required)
+        shell: powershell
+        run: |
+          echo "GN assumed prebuilt or in repo tools"
+
+      - name: Generate build files (GN)
+        shell: bash
+        run: |
+          echo "Generating GN for XB1"
+          gn gen out/${{ matrix.config }} --args="target_platform=\"xb1\" is_debug=${{ matrix.config == 'debug' }}"
+
+      - name: Build Cobalt (Ninja)
+        shell: bash
+        run: |
+          ninja -C out/${{ matrix.config }}
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp -r out/${{ matrix.config }}/* artifacts/
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: xb1-${{ matrix.config }}
+          path: artifacts
+
+  nightly-tag:
+    if: github.event.inputs.nightly == true
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create nightly marker
+        run: echo "Nightly XB1 build completed"
