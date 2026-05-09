@@ -39,14 +39,20 @@ jobs:
       - name: Install GN
         shell: pwsh
         run: |
-          wget https://chrome-infra-packages.appspot.com/dl/gn/gn/linux-amd64/+/latest -O gn.zip
-          unzip gn.zip -d gn_bin
-          sudo mv gn_bin/gn /usr/local/bin/gn
-          sudo chmod +x /usr/local/bin/gn
+          Invoke-WebRequest `
+            -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" `
+            -OutFile gn.zip
+          Expand-Archive -Path gn.zip -DestinationPath gn_bin -Force
+          $gnPath = "$env:GITHUB_WORKSPACE\gn_bin"
+          echo "$gnPath" >> $env:GITHUB_PATH
 
       - name: Set PYTHONPATH
         shell: pwsh
-        run: echo "PYTHONPATH=$GITHUB_WORKSPACE:$PYTHONPATH" >> $GITHUB_ENV
+        run: |
+          "PYTHONPATH=$env:GITHUB_WORKSPACE" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
 
       - name: GN
         shell: pwsh
@@ -63,8 +69,7 @@ jobs:
         shell: pwsh
         run: |
           $env:NINJA_STATUS = "[%e sec | %f/%t %u remaining | %c/sec | j%r] "
-          # ninja -C out/win-win32_gold cobalt -j 4
-          ninja -C out/win-win32_gold cobalt_install
+          ninja -C out/win-win32_gold cobalt -j 4
 
       - name: Create ZIP
         shell: pwsh
@@ -158,6 +163,7 @@ jobs:
           Get-ChildItem out/xb1_gold `
             -Exclude obj,gen,*.ninja,*.ninja_deps,*.ninja_log,toolchain,appx `
             | Copy-Item -Destination out/xb1_zip_staging -Force
+          
           Compress-Archive `
             -Path out/xb1_zip_staging/* `
             -DestinationPath out/TizenTubeCobalt-Xbox-One.zip `
@@ -195,4 +201,3 @@ jobs:
           file_glob: true
           tag: ${{ github.ref_name }}
           overwrite: true
-
