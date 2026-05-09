@@ -40,22 +40,28 @@ jobs:
         run: |
           \( vsWhere = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           \( vsInstaller = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          
+          if (-not (Test-Path $vsWhere)) {
+            Write-Error "vswhere.exe wurde nicht gefunden!"
+            exit 1
+          }
+          
           $vsPath = & $vsWhere -latest -products * -property installationPath
           Write-Host "VS Installation Path: $vsPath"
 
           $components = @(
             "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
             "Microsoft.VisualStudio.Component.VC.14.34.17.4.x86.x64",
-            "Microsoft.VisualStudio.Component.Windows11SDK.26100",      # Primär (neu & stabil)
+            "Microsoft.VisualStudio.Component.Windows11SDK.26100",
             "Microsoft.VisualStudio.Component.Windows11SDK.22621",
             "Microsoft.VisualStudio.Component.Windows10SDK.20348",
-            "Microsoft.VisualStudio.Component.Windows10SDK.18362",      # Cobalt Docs Empfehlung
+            "Microsoft.VisualStudio.Component.Windows10SDK.18362",
             "Microsoft.VisualStudio.ComponentGroup.UWP.VC",
             "Microsoft.VisualStudio.Component.VC.ATL"
           )
 
           $addArgs = ($components | ForEach-Object { "--add $_" }) -join " "
-          Write-Host "Installiere folgende Komponenten: $addArgs"
+          Write-Host "Installiere Komponenten: $addArgs"
 
           $proc = Start-Process -FilePath $vsInstaller `
             -ArgumentList "modify --installPath `"$vsPath`" $addArgs --quiet --norestart --wait" `
@@ -69,23 +75,21 @@ jobs:
           Write-Host "`n=== Installierte Windows SDKs ==="
           Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\include" -Directory | Select-Object Name
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
       - name: Setup MSVC + SDK Environment
         shell: pwsh
         run: |
           \( vsWhere = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Write-Host "VS Path: $vsPath"
 
           # MSVC 14.34 priorisieren
           $msvcPath = "$vsPath\VC\Tools\MSVC\14.34.31933"
           if (Test-Path $msvcPath) {
-            Write-Host "MSVC 14.34.31933 verwendet"
+            Write-Host "MSVC 14.34.31933 wird verwendet"
             Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=14.34.31933"
           } else {
             $latest = (Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
-            Write-Host "MSVC 14.34 nicht gefunden → verwende $latest"
+            Write-Host "Verwende neueste MSVC: $latest"
             Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=$latest"
           }
 
@@ -97,11 +101,11 @@ jobs:
           } else {
             $latestSdk = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\include" -Directory |
               Where-Object { $_.Name -match '^\d' } | Sort-Object Name -Descending | Select-Object -First 1).Name
-            Write-Host "SDK $preferredSdk nicht gefunden → verwende $latestSdk"
+            Write-Host "Verwende SDK: $latestSdk"
             Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$latestSdk"
           }
 
-          # Environment laden
+          # vcvars64 laden
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
           $envOutput = cmd /c "`"$vcvars`" && set"
           foreach ($line in $envOutput) {
@@ -164,7 +168,7 @@ jobs:
           $dst = "C:\Program Files (x86)\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.UniversalCRT.Debug\$sdkVer\Redist\Debug\x64\ucrtbased.dll"
           New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
           Copy-Item -Path $src -Destination $dst -Force
-          Write-Host "ucrtbased.dll kopiert"
+          Write-Host "ucrtbased.dll für Debug kopiert"
 
       - name: Download resources
         shell: pwsh
@@ -175,14 +179,14 @@ jobs:
       - name: GN Gen
         shell: pwsh
         run: |
-          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH"
+          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH}"
           python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
           gn check ${{ env.OUTPUT_DIR }}
 
       - name: Build Cobalt
         shell: pwsh
         run: |
-          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH"
+          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH}"
           $env:NINJA_STATUS = '[%e sec | %f/%t %u remaining | %c/sec | j%r] '
           ninja -C ${{ env.OUTPUT_DIR }} cobalt_install
 
@@ -196,7 +200,10 @@ jobs:
         shell: pwsh
         run: |
           \( appx = Get-ChildItem -Path " \){{ env.OUTPUT_DIR }}/package" -Filter "*.appx" -ErrorAction SilentlyContinue
-          if (-not $appx) { Write-Error "Keine .appx Datei gefunden!"; exit 1 }
+          if (-not $appx) { 
+            Write-Error "Keine .appx Datei gefunden!"
+            exit 1 
+          }
           Write-Host "Erfolgreich erstellt: $($appx.FullName)"
 
       - name: Upload Artifacts
