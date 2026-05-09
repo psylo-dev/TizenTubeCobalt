@@ -1,134 +1,83 @@
-name: uwp_xb1_release
+name: Cobalt Dual-Platform Build (Xbox & Win)
 
 on:
-  workflow_dispatch:
-    inputs:
-      upload_release:
-        description: "Upload GitHub Release"
-        required: false
-        default: false
-        type: boolean
+  push:
+    tags:
+      - 'v*' # Startet Build bei Tags wie v1.0.0
+  workflow_dispatch: # Erlaubt manuelles Starten jederzeit
 
 jobs:
-  xb1:
+  build:
+    name: Build ${{ matrix.platform }}
     runs-on: windows-2022
-    timeout-minutes: 120
+    strategy:
+      fail-fast: false # Wenn ein Build fehlschlägt, läuft der andere weiter
+      matrix:
+        # Hier findet die Magie statt: Beide Plattformen laufen PARALLEL
+        platform: [xb1, win-win32]
+        config: [devel]
 
     env:
-      DEPOT_TOOLS_WIN_TOOLCHAIN: 0
-      BUILD_TYPE: gold
+      DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
+      GYP_MSVS_VERSION: "2022"
 
     steps:
-      - name: Checkout
+      - name: Checkout Cobalt Fork
         uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          path: src
 
-      - name: Install Python dependencies
-        shell: pwsh
+      - name: Cache Depot Tools
+        id: cache-depot-tools
+        uses: actions/cache@v4
+        with:
+          path: depot_tools
+          key: ${{ runner.os }}-depot-tools
+
+      - name: Setup Environment
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      # -------------------------
-      # INSTALL SDK (STABLE WAY)
-      # -------------------------
-      - name: Install Windows SDK (latest available)
-        shell: pwsh
-        run: |
-          choco install windows-sdk-10.0 -y
-
-          $sdkRoot = "C:\Program Files (x86)\Windows Kits\10\include"
-          Write-Host "Installed SDK versions:"
-          Get-ChildItem $sdkRoot
-
-      # -------------------------
-      # USE LATEST SDK AUTOMATICALLY
-      # -------------------------
-      - name: Detect Windows SDK
-        shell: pwsh
-        run: |
-          $sdkBase = "C:\Program Files (x86)\Windows Kits\10\include"
-          $version = Get-ChildItem $sdkBase | Sort-Object Name -Descending | Select-Object -First 1
-
-          if (-not $version) {
-            Write-Error "Kein Windows SDK gefunden"
-            exit 1
+          if ("${{ steps.cache-depot-tools.outputs.cache-hit }}" -ne "true") {
+            git clone https://googlesource.com
           }
-
-          $sdkVersion = $version.Name
-          Write-Host "Using SDK: $sdkVersion"
-
-          Add-Content $env:GITHUB_ENV "WindowsSDKVersion=$sdkVersion"
-
-      # -------------------------
-      # MSVC FIXED
-      # -------------------------
-      - name: Setup MSVC environment
+          echo "$pwd/depot_tools" >> $env:GITHUB_PATH
+          choco install ninja winflexbison3 -y
         shell: pwsh
+
+      - name: GClient Sync (Parallel Cached)
         run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vsWhere -latest -products * -property installationPath
+          cd src
+          gclient config --spec 'solutions = [{ "name": "src", "url": "${{ github.server_url }}/${{ github.repository }}.git", "managed": False, "custom_deps": {}, "safesync_url": "" }]'
+          gclient sync --force --nohooks --no-history --shallow
+        shell: pwsh
 
-          $msvcPath = Get-ChildItem "$vsPath\VC\Tools\MSVC" | Sort-Object Name -Descending | Select-Object -First 1
+      - name: Build Cobalt
+        run: |
+          cd src
+          python cobalt/build/gn.py -p ${{ matrix.platform }} -c ${{ matrix.config }}
+          ninja -C out/${{ matrix.platform }}_${{ matrix.config }} cobalt
+        shell: pwsh
 
-          if (!(Test-Path $msvcPath.FullName)) {
-            Write-Error "MSVC fehlt"
-            exit 1
+      - name: Package Apps
+        run: |
+          cd src
+          mkdir out/final_package
+          if ("${{ matrix.platform }}" -eq "xb1") {
+            python starboard/xb1/tools/packager.py -s out/xb1_devel/ -o out/final_package -p cobalt
+          } else {
+            xcopy /E /I out/win-win32_devel out/final_package
           }
-
-          Add-Content $env:GITHUB_ENV "VCToolsVersion=$($msvcPath.Name)"
-
-      # -------------------------
-      # BUILD
-      # -------------------------
-      - name: Generate GN
         shell: pwsh
-        run: |
-          python cobalt/build/gn.py -c $env:BUILD_TYPE
 
-      - name: Build
-        shell: pwsh
-        run: |
-          ninja -C out/$env:BUILD_TYPE
-
-      # -------------------------
-      # ARTIFACT
-      # -------------------------
-      - name: Collect artifact
-        if: success()
-        shell: pwsh
-        run: |
-          $dir = "artifact"
-          Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $dir
-
-          Copy-Item "out/$env:BUILD_TYPE/*" $dir -Recurse -Force
-
-      - name: Upload artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: xb1_build
-          path: artifact/**
-          retention-days: 30
+          name: Cobalt-${{ matrix.platform }}
+          path: src/out/final_package/
 
-      - name: Release ZIP
-        if: success() && inputs.upload_release == true
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "artifact/*" -DestinationPath "xb1.zip"
-
-      - name: Upload Release
-        if: success() && inputs.upload_release == true
+      - name: Create Release (Optional)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: auto-${{ github.run_number }}
-          files: xb1.zip
+          files: src/out/final_package/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
