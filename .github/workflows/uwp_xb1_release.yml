@@ -34,7 +34,6 @@ jobs:
       - name: Install Python requirements
         shell: pwsh
         run: |
-          # TizenTubeCobalt hat eine requirements.txt mit Build-Dependencies
           pip install -r requirements.txt
 
       - name: Setup MSBuild
@@ -76,7 +75,8 @@ jobs:
       - name: Add NASM to PATH
         shell: pwsh
         run: |
-          $nasmPath = Get-ChildItem "C:\ProgramData\chocolatey\lib\nasm" -Recurse -Filter "nasm.exe" | Select-Object -First 1 -ExpandProperty DirectoryName
+          $nasmPath = Get-ChildItem "C:\ProgramData\chocolatey\lib\nasm" -Recurse -Filter "nasm.exe" |
+            Select-Object -First 1 -ExpandProperty DirectoryName
           echo "$nasmPath" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Set Environment Variables
@@ -85,10 +85,27 @@ jobs:
           echo "BUILD_TYPE=${{ inputs.build_type }}" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Fix ucrtbased.dll path (debug only)
+        if: inputs.build_type == 'debug'
+        shell: pwsh
+        run: |
+          # ucrtbased.dll liegt im SDK bin-Ordner, Ninja erwartet sie aber
+          # unter dem ExtensionSDKs-Pfad — wir kopieren sie dorthin
+          $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+            Sort-Object Name -Descending | Select-Object -First 1).Name
+
+          $src = "C:\Program Files (x86)\Windows Kits\10\bin\$sdkVer\x64\ucrt\ucrtbased.dll"
+          $dst = "C:\Program Files (x86)\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.UniversalCRT.Debug\$sdkVer\Redist\Debug\x64\ucrtbased.dll"
+
+          New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+          Copy-Item -Path $src -Destination $dst -Force
+          Write-Host "Kopiert von: $src"
+          Write-Host "Kopiert nach: $dst"
+
       - name: Download resources
         shell: pwsh
         run: |
-          # TizenTubeCobalt-spezifisch: laedt externe Ressourcen/Assets vor dem Build
           $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
           python download_resources.py
 
@@ -103,17 +120,11 @@ jobs:
       - name: GN Gen
         shell: pwsh
         run: |
-          # PYTHONPATH muss das Repo-Root zuerst enthalten (BUILDCONFIG.gn assert)
-          # build/timestamp.gni braucht compute_build_timestamp.py via exec_script
           $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-
-          # Offizieller Cobalt-Wrapper: setzt build_timestamp und alle
-          # internen GN-Variablen korrekt auf, ruft dann gn gen auf
           python cobalt/build/gn.py `
             -p xb1 `
             -c ${{ inputs.build_type }} `
             -o ${{ env.OUTPUT_DIR }}
-
           gn check ${{ env.OUTPUT_DIR }}
 
       - name: Build Cobalt
@@ -150,16 +161,6 @@ jobs:
             ${{ env.OUTPUT_DIR }}/cobalt*
             ${{ env.OUTPUT_DIR }}/package/**/*
 
-      - name: Upload to GitHub Release
-        if: inputs.upload_release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ${{ env.OUTPUT_DIR }}/package/*.appx
-          file_glob: true
-          asset_name: cobalt-xb1-${{ inputs.build_type }}.appx
-          tag: ${{ github.ref_type == 'tag' && github.ref_name || 'manual-build' }}
-          overwrite: true
       - name: Upload to GitHub Release
         if: inputs.upload_release
         uses: svenstaro/upload-release-action@v2
