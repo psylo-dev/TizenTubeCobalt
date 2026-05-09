@@ -31,6 +31,12 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Install Python requirements
+        shell: pwsh
+        run: |
+          # TizenTubeCobalt hat eine requirements.txt mit Build-Dependencies
+          pip install -r requirements.txt
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
@@ -79,6 +85,13 @@ jobs:
           echo "BUILD_TYPE=${{ inputs.build_type }}" | Out-File -FilePath $env:GITHUB_ENV -Append
           echo "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Download resources
+        shell: pwsh
+        run: |
+          # TizenTubeCobalt-spezifisch: laedt externe Ressourcen/Assets vor dem Build
+          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          python download_resources.py
+
       - name: Cache Ninja build output
         uses: actions/cache@v4
         with:
@@ -90,21 +103,30 @@ jobs:
       - name: GN Gen
         shell: pwsh
         run: |
+          # PYTHONPATH muss das Repo-Root zuerst enthalten (BUILDCONFIG.gn assert)
+          # build/timestamp.gni braucht compute_build_timestamp.py via exec_script
           $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
-          gn gen ${{ env.OUTPUT_DIR }} `
-            --args="target_platform=`"xb1`" target_os=`"winuwp`" target_cpu=`"x64`" build_type=`"${{ inputs.build_type }}`""
+
+          # Offizieller Cobalt-Wrapper: setzt build_timestamp und alle
+          # internen GN-Variablen korrekt auf, ruft dann gn gen auf
+          python cobalt/build/gn.py `
+            -p xb1 `
+            -c ${{ inputs.build_type }} `
+            -o ${{ env.OUTPUT_DIR }}
 
           gn check ${{ env.OUTPUT_DIR }}
 
       - name: Build Cobalt
         shell: pwsh
         run: |
+          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
           $env:NINJA_STATUS = "[%e sec | %f/%t %u remaining | %c/sec | j%r] "
           ninja -C ${{ env.OUTPUT_DIR }} cobalt_install
 
       - name: Package Appx
         shell: pwsh
         run: |
+          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
           python starboard/xb1/tools/packager.py `
             -s ${{ env.OUTPUT_DIR }}/ `
             -o ${{ env.OUTPUT_DIR }}/package `
@@ -128,6 +150,16 @@ jobs:
             ${{ env.OUTPUT_DIR }}/cobalt*
             ${{ env.OUTPUT_DIR }}/package/**/*
 
+      - name: Upload to GitHub Release
+        if: inputs.upload_release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.OUTPUT_DIR }}/package/*.appx
+          file_glob: true
+          asset_name: cobalt-xb1-${{ inputs.build_type }}.appx
+          tag: ${{ github.ref_type == 'tag' && github.ref_name || 'manual-build' }}
+          overwrite: true
       - name: Upload to GitHub Release
         if: inputs.upload_release
         uses: svenstaro/upload-release-action@v2
