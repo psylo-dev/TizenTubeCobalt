@@ -1,0 +1,70 @@
+name: Build Cobalt XB1 (Fork)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE: ghcr.io/youtube/cobalt/cobalt-build-xb1:experimental-unused
+
+    steps:
+      # Repo holen
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Docker prüfen
+      - name: Docker version
+        run: docker version
+
+      # GHCR Login (für Images)
+      - name: Login GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # XB1 Build Image holen
+      - name: Pull XB1 image
+        run: docker pull $IMAGE
+
+      # Build im Container ausführen
+      - name: Build cobalt (XB1)
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/src \
+            -w /src \
+            $IMAGE \
+            bash -c "
+              set -e
+
+              echo '=== Cobalt XB1 Build Start ==='
+
+              # typische cobalt builds
+              if [ -f ./scripts/build.sh ]; then
+                chmod +x ./scripts/build.sh
+                ./scripts/build.sh xb1
+              elif [ -f ./build.sh ]; then
+                chmod +x ./build.sh
+                ./build.sh xb1
+              else
+                echo 'No build script found, trying npm build...'
+                npm install
+                npm run build || npm run xb1 || npm run release
+              fi
+
+              echo '=== Build finished ==='
+            "
+
+      # Artefakte sichern
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobalt-xb1-build
+          path: |
+            dist/**
+            build/**
+            out/**
+            *.zip
+            *.tar
