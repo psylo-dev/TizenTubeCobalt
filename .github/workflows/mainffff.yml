@@ -1,4 +1,4 @@
-name: Build Cobalt XB1 (Fork)
+name: Build Cobalt XB1 (Windows)
 
 on:
   workflow_dispatch:
@@ -7,64 +7,48 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     env:
       IMAGE: ghcr.io/youtube/cobalt/cobalt-build-xb1:experimental-unused
 
     steps:
-      # Repo holen
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Docker prüfen
       - name: Docker version
         run: docker version
 
-      # GHCR Login (für Images)
       - name: Login GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      # XB1 Build Image holen
-      - name: Pull XB1 image
-        run: docker pull $IMAGE
+      - name: Pull XB1 Windows Image
+        run: docker pull $env:IMAGE
 
-      # Build im Container ausführen
-      - name: Build cobalt (XB1)
+      - name: Run build container
         run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/src \
-            -w /src \
-            $IMAGE \
-            bash -c "
-              set -e
+          docker run --rm `
+            -v ${PWD}:/src `
+            -w /src `
+            $env:IMAGE `
+            powershell -Command "
+              Write-Host 'XB1 Build Start'
 
-              echo '=== Cobalt XB1 Build Start ==='
-
-              # typische cobalt builds
-              if [ -f ./scripts/build.sh ]; then
-                chmod +x ./scripts/build.sh
-                ./scripts/build.sh xb1
-              elif [ -f ./build.sh ]; then
-                chmod +x ./build.sh
-                ./build.sh xb1
-              else
-                echo 'No build script found, trying npm build...'
+              if (Test-Path ./scripts/build.ps1) {
+                ./scripts/build.ps1 xb1
+              } elseif (Test-Path ./build.ps1) {
+                ./build.ps1 xb1
+              } else {
                 npm install
-                npm run build || npm run xb1 || npm run release
-              fi
-
-              echo '=== Build finished ==='
+                npm run build
+              }
             "
 
-      # Artefakte sichern
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cobalt-xb1-build
+          name: cobalt-xb1
           path: |
             dist/**
             build/**
             out/**
-            *.zip
-            *.tar
