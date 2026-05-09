@@ -1,188 +1,348 @@
-name: uwp_xb1_releaseee
+name: xbox ci
 
 on:
   workflow_dispatch:
     inputs:
+      build_type:
+        description: "Build Type (gold oder debug)"
+        required: true
+        default: "gold"
+        type: choice
+        options:
+          - gold
+          - debug
       upload_release:
-        description: "Upload GitHub Release"
+        description: "Upload als Release Asset"
         required: false
         default: false
         type: boolean
 
 jobs:
   xb1:
-    runs-on: windows-latest
-    timeout-minutes: 120
+    runs-on: windows-2022
 
     env:
-      DEPOT_TOOLS_WIN_TOOLCHAIN: 0
-      BUILD_TYPE: gold
+      PYTHONPATH: ${{ github.workspace }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # -------------------------
+      # CACHE LAYER
+      # -------------------------
+      - name: Cache Pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Cache GN
+        uses: actions/cache@v4
+        with:
+          path: C:\tools\gn
+          key: gn-windows
+
+      # -------------------------
+      # PYTHON SETUP
+      # -------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.10"
 
-      - name: Install Python dependencies
+      - name: Disable Python Store Alias
+        shell: pwsh
+        run: Remove-Item "$env:LOCALAPPDATA\Microsoft\WindowsApps\python*.exe" -ErrorAction SilentlyContinue
+
+      - name: Install Python deps
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt --prefer-binary --no-input
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Install Visual Studio workloads + SDKs
+      # -------------------------
+      # MSVC ENVIRONMENT SETUP
+      # -------------------------
+      - name: Setup MSVC Environment
         shell: pwsh
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-
-          $vsPath = & $vsWhere -latest -products * -property installationPath
-
-          if ([string]::IsNullOrWhiteSpace($vsPath)) {
-            Write-Error "Visual Studio nicht gefunden"
-            exit 1
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
+          $envOut = cmd /c "`"$vcvars`" && set"
+          foreach ($line in $envOut) {
+            if ($line -match "^([^=]+)=(.*)$") {
+              $name = $matches[1]; $val = $matches[2]
+              if ($name -eq "Path") {
+                $val -split ";" | ForEach-Object { if ($_ -and (Test-Path $_)) { Add-Content $env:GITHUB_PATH $_ } }
+              } else {
+                Add-Content $env:GITHUB_ENV "$name=$val"
+              }
+            }
           }
 
-          Write-Host "VS gefunden:"
-          Write-Host $vsPath
+      # -------------------------
+      # TOOLS (GN + NASM FIXED)
+      # -------------------------
+      - name: Install Build Tools
+        shell: pwsh
+        run: |
+          # Install GN
+          if (!(Test-Path "C:\tools\gn")) {
+            New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
+            Invoke-WebRequest "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" -OutFile gn.zip
+            Expand-Archive gn.zip C:\tools\gn -Force
+          }
+          Add-Content $env:GITHUB_PATH "C:\tools\gn"
 
-          $components = @(
-            "Microsoft.VisualStudio.Workload.NativeDesktop"
-            "Microsoft.VisualStudio.Workload.Universal"
-
-            "Microsoft.VisualStudio.ComponentGroup.UWP.VC"
-            "Microsoft.VisualStudio.Component.VC.ATL"
-
-            "Microsoft.VisualStudio.Component.VC.14.34.17.4.x86.x64"
-
-            "Microsoft.VisualStudio.Component.Windows10SDK.18362"
-            "Microsoft.VisualStudio.Component.Windows11SDK.22000"
-          )
-
-          $args = @(
-            "modify"
-            "--installPath"
-            "`"$vsPath`""
-            "--quiet"
-            "--norestart"
-          )
-
-          foreach ($c in $components) {
-            $args += "--add"
-            $args += $c
+          # Install NASM and force refresh PATH
+          if (!(Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm -y --no-progress
+            $nasmPath = "C:\Program Files\NASM"
+            if (Test-Path $nasmPath) {
+              Add-Content $env:GITHUB_PATH $nasmPath
+            }
           }
 
-          Write-Host ($args -join " ")
-
-          $proc = Start-Process `
-            -FilePath $vsInstaller `
-            -ArgumentList $args `
-            -Wait `
-            -PassThru
-
-          Write-Host "Installer ExitCode: $($proc.ExitCode)"
-
-          if ($proc.ExitCode -ne 0) {
-            Write-Error "VS Installation fehlgeschlagen"
-            exit 1
+      # -------------------------
+      # BUILD CONFIG & JUNCTION FIX
+      # -------------------------
+      - name: Set Build Variables & Path Fix
+        shell: pwsh
+        run: |
+          Add-Content $env:GITHUB_ENV "BUILD_TYPE=${{ inputs.build_type }}"
+          Add-Content $env:GITHUB_ENV "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}"
+          $msvcBase = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+          if (Test-Path $msvcBase) {
+            $actual = Get-ChildItem $msvcBase | Select-Object -First 1
+            $required = Join-Path $msvcBase "14.34.31933"
+            if (!(Test-Path $required)) {
+                New-Item -ItemType Junction -Path $required -Value $actual.FullName
+            }
           }
 
-      - name: Verify WinMD contract
+      # -------------------------
+      # EXECUTION STEPS
+      # -------------------------
+      - name: Download Resources
+        shell: pwsh
+        run: python download_resources.py
+
+      - name: GN Gen
         shell: pwsh
         run: |
-          $winmd = "C:\Program Files (x86)\Windows Kits\10\References\10.0.22000.0\Windows.Foundation.FoundationContract\4.0.0.0\Windows.Foundation.FoundationContract.winmd"
+          # Final tool check
+          where.exe nasm
+          python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
 
-          if (!(Test-Path $winmd)) {
-            Write-Error "WINMD fehlt"
-            Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\References" -Recurse -ErrorAction SilentlyContinue
-            exit 1
-          }
-
-          Write-Host "WINMD OK"
-
-      - name: Setup MSVC environment
+      - name: Build (NINJA)
         shell: pwsh
         run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vsWhere -latest -products * -property installationPath
+          $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
+          # Hide the O1/O2 override warnings
+          $env:_CL_ = "/wd9025"
+          # Ensure current shell session sees nasm
+          $env:PATH = "C:\Program Files\NASM;$env:PATH"
+          ninja -C ${{ env.OUTPUT_DIR }} cobalt_install -j $env:NUMBER_OF_PROCESSORS
 
-          $msvcVersion = "14.34.31933"
-          $sdkVersion = "10.0.18362.0"
-
-          $msvcPath = "$vsPath\VC\Tools\MSVC\$msvcVersion"
-          if (!(Test-Path $msvcPath)) {
-            Write-Error "MSVC fehlt"
-            exit 1
-          }
-
-          $sdkPath = "C:\Program Files (x86)\Windows Kits\10\include\$sdkVersion"
-          if (!(Test-Path $sdkPath)) {
-            Write-Error "SDK fehlt"
-            exit 1
-          }
-
-          Add-Content $env:GITHUB_ENV "VCToolsVersion=$msvcVersion"
-          Add-Content $env:GITHUB_ENV "WindowsSDKVersion=$sdkVersion"
-
-          Write-Host "Toolchain OK"
-
-      - name: Verify toolchain
+      # -------------------------
+      # PACKAGE & UPLOAD
+      # -------------------------
+      - name: Package Appx
         shell: pwsh
-        run: |
-          Write-Host "MSVC: $env:VCToolsVersion"
-          Write-Host "SDK: $env:WindowsSDKVersion"
+        run: python starboard/xb1/tools/packager.py -s ${{ env.OUTPUT_DIR }}/ -o ${{ env.OUTPUT_DIR }}/package -p cobalt
 
-      - name: Create output directory
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "out/$env:BUILD_TYPE"
-
-      - name: Generate GN files
-        shell: pwsh
-        run: |
-          python cobalt/build/gn.py -c $env:BUILD_TYPE
-
-      - name: Build Cobalt
-        shell: pwsh
-        run: |
-          ninja -C out/$env:BUILD_TYPE
-
-      - name: Collect artifacts
-        if: success()
-        shell: pwsh
-        run: |
-          $dir = "artifact_upload"
-          Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $dir
-
-          Copy-Item "out/$env:BUILD_TYPE/*" $dir -Recurse -Force
-
-      - name: Upload artifact
-        if: success()
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cobalt_xb1_gold
-          path: artifact_upload/**
-          retention-days: 30
+          name: cobalt-xb1-${{ inputs.build_type }}
+          path: |
+            ${{ env.OUTPUT_DIR }}/cobalt*
+            ${{ env.OUTPUT_DIR }}/package/**
 
-      - name: Create release zip
-        if: success() && inputs.upload_release == true
+      - name: Release Upload
+        if: inputs.upload_release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.OUTPUT_DIR }}/package/*.appx
+          file_glob: true
+          asset_name: cobalt-xb1-${{ inputs.build_type }}.appx
+          tag: manual-build
+          overwrite: true
+name: xbox ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build Type (gold oder debug)"
+        required: true
+        default: "gold"
+        type: choice
+        options:
+          - gold
+          - debug
+      upload_release:
+        description: "Upload als Release Asset"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  xb1:
+    runs-on: windows-2022
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -------------------------
+      # CACHE LAYER
+      # -------------------------
+      - name: Cache Pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Cache GN
+        uses: actions/cache@v4
+        with:
+          path: C:\tools\gn
+          key: gn-windows
+
+      # -------------------------
+      # PYTHON SETUP
+      # -------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Disable Python Store Alias
+        shell: pwsh
+        run: Remove-Item "$env:LOCALAPPDATA\Microsoft\WindowsApps\python*.exe" -ErrorAction SilentlyContinue
+
+      - name: Install Python deps
         shell: pwsh
         run: |
-          Compress-Archive -Path "artifact_upload/*" -DestinationPath "cobalt_xb1_gold.zip"
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt --prefer-binary --no-input
 
-      - name: Upload release
-        if: success() && inputs.upload_release == true
-        uses: softprops/action-gh-release@v2
+      # -------------------------
+      # MSVC ENVIRONMENT SETUP
+      # -------------------------
+      - name: Setup MSVC Environment
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
+          $envOut = cmd /c "`"$vcvars`" && set"
+          foreach ($line in $envOut) {
+            if ($line -match "^([^=]+)=(.*)$") {
+              $name = $matches[1]; $val = $matches[2]
+              if ($name -eq "Path") {
+                $val -split ";" | ForEach-Object { if ($_ -and (Test-Path $_)) { Add-Content $env:GITHUB_PATH $_ } }
+              } else {
+                Add-Content $env:GITHUB_ENV "$name=$val"
+              }
+            }
+          }
+
+      # -------------------------
+      # TOOLS (GN + NASM FIXED)
+      # -------------------------
+      - name: Install Build Tools
+        shell: pwsh
+        run: |
+          # Install GN
+          if (!(Test-Path "C:\tools\gn")) {
+            New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
+            Invoke-WebRequest "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" -OutFile gn.zip
+            Expand-Archive gn.zip C:\tools\gn -Force
+          }
+          Add-Content $env:GITHUB_PATH "C:\tools\gn"
+
+          # Install NASM and force refresh PATH
+          if (!(Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm -y --no-progress
+            $nasmPath = "C:\Program Files\NASM"
+            if (Test-Path $nasmPath) {
+              Add-Content $env:GITHUB_PATH $nasmPath
+            }
+          }
+
+      # -------------------------
+      # BUILD CONFIG & JUNCTION FIX
+      # -------------------------
+      - name: Set Build Variables & Path Fix
+        shell: pwsh
+        run: |
+          Add-Content $env:GITHUB_ENV "BUILD_TYPE=${{ inputs.build_type }}"
+          Add-Content $env:GITHUB_ENV "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}"
+          $msvcBase = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+          if (Test-Path $msvcBase) {
+            $actual = Get-ChildItem $msvcBase | Select-Object -First 1
+            $required = Join-Path $msvcBase "14.34.31933"
+            if (!(Test-Path $required)) {
+                New-Item -ItemType Junction -Path $required -Value $actual.FullName
+            }
+          }
+
+      # -------------------------
+      # EXECUTION STEPS
+      # -------------------------
+      - name: Download Resources
+        shell: pwsh
+        run: python download_resources.py
+
+      - name: GN Gen
+        shell: pwsh
+        run: |
+          # Final tool check
+          where.exe nasm
+          python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
+
+      - name: Build (NINJA)
+        shell: pwsh
+        run: |
+          $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
+          # Hide the O1/O2 override warnings
+          $env:_CL_ = "/wd9025"
+          # Ensure current shell session sees nasm
+          $env:PATH = "C:\Program Files\NASM;$env:PATH"
+          ninja -C ${{ env.OUTPUT_DIR }} cobalt_install -j $env:NUMBER_OF_PROCESSORS
+
+      # -------------------------
+      # PACKAGE & UPLOAD
+      # -------------------------
+      - name: Package Appx
+        shell: pwsh
+        run: python starboard/xb1/tools/packager.py -s ${{ env.OUTPUT_DIR }}/ -o ${{ env.OUTPUT_DIR }}/package -p cobalt
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: auto-${{ github.run_number }}
-          generate_release_notes: true
-          files: cobalt_xb1_gold.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: cobalt-xb1-${{ inputs.build_type }}
+          path: |
+            ${{ env.OUTPUT_DIR }}/cobalt*
+            ${{ env.OUTPUT_DIR }}/package/**
+
+      - name: Release Upload
+        if: inputs.upload_release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.OUTPUT_DIR }}/package/*.appx
+          file_glob: true
+          asset_name: cobalt-xb1-${{ inputs.build_type }}.appx
+          tag: manual-build
+          overwrite: true
