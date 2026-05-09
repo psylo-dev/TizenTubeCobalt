@@ -144,6 +144,15 @@ jobs:
         shell: pwsh
         run: |
           $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
+          # This environment variable is picked up by cl.exe automatically
+          $env:_CL_ = "/wd9025" 
+          ninja -C ${{ env.OUTPUT_DIR }} cobalt_install -j $env:NUMBER_OF_PROCESSORS
+
+
+      - name: Build (NINJA)
+        shell: pwsh
+        run: |
+          $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
           ninja -C ${{ env.OUTPUT_DIR }} cobalt_install -j $env:NUMBER_OF_PROCESSORS
 
       - name: Package Appx
