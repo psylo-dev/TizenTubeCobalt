@@ -61,7 +61,7 @@ jobs:
           $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           
           gn gen out/win-win32_gold `
-            --args="target_platform=`"win-win32`" target_os=`"win32`" target_cpu=`"x86`" build_type=`"gold`" sb_api_version=15 build_timestamp=$timestamp"
+            --args="target_platform=`"win-win32`" target_os=`"win32`" target_cpu=`"x86`" build_type=`"gold`" sb_api_version=15 build_timestamp=$timestamp host_os=`"win`" host_cpu=`"x64`" custom_toolchain=`"//starboard/win/win32/toolchain:target`" host_toolchain=`"//starboard/build/toolchain/win:x64`""
           
           gn check out/win-win32_gold
 
@@ -136,7 +136,7 @@ jobs:
           $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
           gn gen out/xb1_gold `
-            --args="target_platform=`"xb1`" target_os=`"xboxone`" target_cpu=`"x64`" build_type=`"gold`" sb_api_version=15 build_timestamp=$timestamp"
+            --args="target_platform=`"xb1`" target_os=`"xboxone`" target_cpu=`"x64`" build_type=`"gold`" sb_api_version=15 build_timestamp=$timestamp host_os=`"win`" host_cpu=`"x64`" custom_toolchain=`"//starboard/xb1/toolchain:target`" host_toolchain=`"//starboard/build/toolchain/win:x64`""
           
           gn check out/xb1_gold
 
