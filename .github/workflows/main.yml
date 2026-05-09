@@ -38,11 +38,12 @@ jobs:
       - name: Install required MSVC and Windows SDK versions
         shell: pwsh
         run: |
-          \( vsWhere = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          \( vsInstaller = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $ProgramFiles86 = ${env:ProgramFiles(x86)}
+          $vsWhere = "$ProgramFiles86\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstaller = "$ProgramFiles86\Microsoft Visual Studio\Installer\vs_installer.exe"
           
           if (-not (Test-Path $vsWhere)) {
-            Write-Error "vswhere.exe wurde nicht gefunden!"
+            Write-Error "vswhere.exe nicht gefunden!"
             exit 1
           }
           
@@ -78,11 +79,12 @@ jobs:
       - name: Setup MSVC + SDK Environment
         shell: pwsh
         run: |
-          \( vsWhere = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $ProgramFiles86 = ${env:ProgramFiles(x86)}
+          $vsWhere = "$ProgramFiles86\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           Write-Host "VS Path: $vsPath"
 
-          # MSVC 14.34 priorisieren
+          # MSVC
           $msvcPath = "$vsPath\VC\Tools\MSVC\14.34.31933"
           if (Test-Path $msvcPath) {
             Write-Host "MSVC 14.34.31933 wird verwendet"
@@ -93,7 +95,7 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=$latest"
           }
 
-          # SDK 10.0.26100 priorisieren
+          # SDK
           $preferredSdk = "10.0.26100.0"
           if (Test-Path "C:\Program Files (x86)\Windows Kits\10\include\$preferredSdk") {
             Write-Host "SDK $preferredSdk wird verwendet"
@@ -105,7 +107,7 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$latestSdk"
           }
 
-          # vcvars64 laden
+          # vcvars laden
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
           $envOutput = cmd /c "`"$vcvars`" && set"
           foreach ($line in $envOutput) {
@@ -168,7 +170,6 @@ jobs:
           $dst = "C:\Program Files (x86)\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.UniversalCRT.Debug\$sdkVer\Redist\Debug\x64\ucrtbased.dll"
           New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
           Copy-Item -Path $src -Destination $dst -Force
-          Write-Host "ucrtbased.dll für Debug kopiert"
 
       - name: Download resources
         shell: pwsh
