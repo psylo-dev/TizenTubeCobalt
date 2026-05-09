@@ -17,6 +17,7 @@ env:
   IS_CI: 1
   LANG: en_US.UTF-8
   NINJA_STATUS: '[%e sec | %f/%t %u remaining | %c/sec | j%r]'
+  PYTHONPATH: ${{ github.workspace }}
 
 concurrency:
   group: xb1-${{ github.ref }}
@@ -33,44 +34,69 @@ jobs:
         config: [devel, debug, qa, gold]
 
     steps:
+
       - name: Checkout Cobalt
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # -------------------------
+      # Dependencies
+      # -------------------------
       - name: Install dependencies
         shell: powershell
         run: |
-          choco install ninja python git -y
+          choco install ninja git -y
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # -------------------------
+      # GN TOOL (FIXED)
+      # -------------------------
       - name: Install GN
         shell: bash
         run: |
-          mkdir -p toolsss
-          cd toolsss
+          mkdir -p tools/gn
+          cd tools/gn
 
           curl -L -o gn.zip https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest
           unzip gn.zip
 
           echo "$(pwd)" >> $GITHUB_PATH
-          echo "GN installed"
 
+      # -------------------------
+      # CRITICAL FIX (Starboard / Python)
+      # -------------------------
+      - name: Fix PYTHONPATH for Cobalt/Starboard
+        shell: bash
+        run: |
+          echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          export PYTHONPATH=$GITHUB_WORKSPACE
+          echo "PYTHONPATH set to $PYTHONPATH"
+
+      # -------------------------
+      # GN GENERATE (FIXED CONTEXT)
+      # -------------------------
       - name: Generate build files (GN)
         shell: bash
         run: |
-          echo "Generating GN for XB1"
-          gn gen out/${{ matrix.config }} --args="target_platform=\"xb1\" is_debug=${{ matrix.config == 'debug' }}"
+          gn gen out/${{ matrix.config }} \
+            --args="target_platform=\"xb1\" is_debug=${{ matrix.config == 'debug' }}"
 
+      # -------------------------
+      # BUILD
+      # -------------------------
       - name: Build Cobalt (Ninja)
         shell: bash
         run: |
           ninja -C out/${{ matrix.config }}
 
+      # -------------------------
+      # ARTIFACTS
+      # -------------------------
       - name: Package artifacts
         shell: bash
         run: |
