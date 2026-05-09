@@ -21,9 +21,9 @@ on:
 
 jobs:
 
-  # =========================
-  # WIN32
-  # =========================
+# =========================
+# WIN32
+# =========================
   win32:
     runs-on: windows-2022
 
@@ -47,13 +47,14 @@ jobs:
           .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
       # -------------------------
-      # GN (FIXED)
+      # GN INSTALL (FIXED - NO where.exe)
       # -------------------------
       - name: Install GN
         shell: pwsh
         run: |
           if (!(Test-Path "C:\tools\gn")) {
             New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
+
             Invoke-WebRequest `
               "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" `
               -OutFile gn.zip
@@ -62,7 +63,9 @@ jobs:
           }
 
           echo "C:\tools\gn" >> $env:GITHUB_PATH
-          where.exe gn
+
+          # SAFE CHECK (no PATH dependency)
+          & "C:\tools\gn\gn.exe" --version
 
       # -------------------------
       # FLEX / BISON FIX
@@ -82,8 +85,6 @@ jobs:
               Add-Content $env:GITHUB_PATH $p
             }
           }
-
-          where.exe win_bison
 
       # -------------------------
       # MSVC
@@ -116,9 +117,10 @@ jobs:
           path: out/win32/**
 
 
-  # =========================
-  # XB1
-  # =========================
+
+# =========================
+# XB1
+# =========================
   xb1:
     runs-on: windows-2022
 
@@ -129,6 +131,115 @@ jobs:
       - uses: actions/checkout@v4
 
       # -------------------------
+      # PYTHON VENV
+      # -------------------------
+      - name: Create venv
+        shell: pwsh
+        run: py -3 -m venv .venv
+
+      - name: Install Python deps
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+      # -------------------------
+      # GN INSTALL (SAFE)
+      # -------------------------
+      - name: Install GN
+        shell: pwsh
+        run: |
+          if (!(Test-Path "C:\tools\gn")) {
+            New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
+
+            Invoke-WebRequest `
+              "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" `
+              -OutFile gn.zip
+
+            Expand-Archive gn.zip C:\tools\gn -Force
+          }
+
+          echo "C:\tools\gn" >> $env:GITHUB_PATH
+          & "C:\tools\gn\gn.exe" --version
+
+      # -------------------------
+      # FLEX / BISON
+      # -------------------------
+      - name: Install win_bison
+        shell: pwsh
+        run: |
+          choco install winflexbison -y --no-progress
+
+          $paths = @(
+            "C:\ProgramData\chocolatey\bin",
+            "C:\ProgramData\chocolatey\lib\winflexbison\tools"
+          )
+
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Add-Content $env:GITHUB_PATH $p
+            }
+          }
+
+      # -------------------------
+      # MSVC
+      # -------------------------
+      - name: Setup MSVC
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+
+          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
+            if ($_ -match "^([^=]+)=(.*)$") {
+              Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])"
+            }
+          }
+
+      # -------------------------
+      # BUILD XB1
+      # -------------------------
+      - name: GN gen xb1
+        run: .\.venv\Scripts\python.exe cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o out/xb1
+
+      - name: Build xb1
+        run: ninja -C out/xb1 cobalt_install
+
+      - name: Upload xb1
+        uses: actions/upload-artifact@v4
+        with:
+          name: xb1-build
+          path: out/xb1/**
+
+
+
+# =========================
+# RELEASE MERGE
+# =========================
+  release:
+    needs: [win32, xb1]
+    if: inputs.upload_release
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: win32-build
+          path: dist/win32
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: xb1-build
+          path: dist/xb1
+
+      - name: Upload Release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/**/*
+          file_glob: true
+          tag: multi-build
+          overwrite: true      # -------------------------
       # PYTHON VENV
       # -------------------------
       - name: Create venv
