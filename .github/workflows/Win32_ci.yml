@@ -1,4 +1,4 @@
-name: win32 xbox-compatible ci
+name: win32 + xb1 parallel ci
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ on:
         options:
           - gold
           - debug
+
       upload_release:
         description: "As Release Asset"
         required: false
@@ -18,116 +19,135 @@ on:
         type: boolean
 
 jobs:
-  win32_compat:
+
+  # =========================
+  # WIN32 BUILD
+  # =========================
+  win32:
     runs-on: windows-2022
 
     env:
       PYTHONPATH: ${{ github.workspace }}
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # -------------------------
-      # PYTHON
-      # -------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.8"
+          python-version: "3.10"
 
-      - name: Install Python deps
+      - name: Install deps
         shell: pwsh
         run: |
-          python -m pip install -r requirements.txt --prefer-binary --no-input
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      # -------------------------
-      # MSVC ENV
-      # -------------------------
-      - name: Setup MSVC Environment
+      # FIX BISON
+      - name: Install win_bison
+        shell: pwsh
+        run: |
+          choco install winflexbison -y --no-progress
+          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+
+      - name: Setup MSVC
         shell: pwsh
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          
-          $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
-          $envOut = cmd /c "`"$vcvars`" && set"
-          
-          foreach ($line in $envOut) {
-            if ($line -match "^([^=]+)=(.*)$") {
-              $name = $matches[1]; $val = $matches[2]
-              if ($name -eq "Path") {
-                $val -split ";" | ForEach-Object {
-                  if ($_ -and (Test-Path $_)) { Add-Content $env:GITHUB_PATH $_ }
-                }
-              } else {
-                Add-Content $env:GITHUB_ENV "$name=$val"
-              }
-            }
+          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
+            if ($_ -match "^([^=]+)=(.*)$") { Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])" }
           }
 
-      # -------------------------
-      # FIX: FLEX + BISON (WICHTIG!)
-      # -------------------------
-      - name: Install win_flex_bison
+      - name: GN gen win32
+        run: python cobalt/build/gn.py -p win32 -c ${{ inputs.build_type }} -o out/win32
+
+      - name: Build win32
+        run: ninja -C out/win32 cobalt_install
+
+      - name: Upload win32
+        uses: actions/upload-artifact@v4
+        with:
+          name: win32-build
+          path: out/win32/cobalt*
+
+
+  # =========================
+  # XB1 BUILD (PARALLEL)
+  # =========================
+  xb1:
+    runs-on: windows-2022
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # FIX BISON
+      - name: Install win_bison
         shell: pwsh
         run: |
           choco install winflexbison -y --no-progress
+          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
 
-          $bisonPath = "C:\ProgramData\chocolatey\lib\winflexbison\tools"
-          if (Test-Path $bisonPath) {
-            Add-Content $env:GITHUB_PATH $bisonPath
+      - name: Setup MSVC
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
+            if ($_ -match "^([^=]+)=(.*)$") { Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])" }
           }
 
-      # -------------------------
-      # GN TOOL
-      # -------------------------
-      - name: Install GN
-        shell: pwsh
-        run: |
-          if (!(Test-Path "C:\tools\gn")) {
-            New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
-            Invoke-WebRequest "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" -OutFile gn.zip
-            Expand-Archive gn.zip C:\tools\gn -Force
-          }
-          Add-Content $env:GITHUB_PATH "C:\tools\gn"
+      - name: GN gen xb1
+        run: python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o out/xb1
 
-      # -------------------------
-      # BUILD
-      # -------------------------
-      - name: Download Resources
-        shell: pwsh
-        run: python download_resources.py
+      - name: Build xb1
+        run: ninja -C out/xb1 cobalt_install
 
-      - name: GN Gen
-        shell: pwsh
-        run: |
-          python cobalt/build/gn.py -p win32 -c ${{ inputs.build_type }} -o out/win32
-
-      - name: Build (Ninja)
-        shell: pwsh
-        run: |
-          $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
-          $env:_CL_ = "/wd9025"
-          ninja -C out/win32 cobalt_install -j $env:NUMBER_OF_PROCESSORS
-
-      # -------------------------
-      # ARTIFACTS
-      # -------------------------
-      - name: Upload Build
+      - name: Upload xb1
         uses: actions/upload-artifact@v4
         with:
-          name: cobalt-win32-${{ inputs.build_type }}
-          path: out/win32/cobalt*
+          name: xb1-build
+          path: out/xb1/cobalt*
 
-      - name: Release Upload
-        if: inputs.upload_release
+
+  # =========================
+  # OPTIONAL RELEASE MERGE
+  # =========================
+  release:
+    needs: [win32, xb1]
+    if: inputs.upload_release
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: win32-build
+          path: dist/win32
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: xb1-build
+          path: dist/xb1
+
+      - name: Upload Release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: out/win32/*.exe
+          file: dist/**/*.exe
           file_glob: true
-          asset_name: cobalt-win32-${{ inputs.build_type }}.exe
-          tag: win32-build
+          tag: multi-build
           overwrite: true
