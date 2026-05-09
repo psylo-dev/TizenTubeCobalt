@@ -65,7 +65,6 @@ jobs:
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           
-          # Wir nutzen vcvars64.bat für eine saubere 64-bit Win32 Umgebung
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
           $envOut = cmd /c "`"$vcvars`" && set"
           
@@ -86,7 +85,6 @@ jobs:
       - name: Install Build Tools
         shell: pwsh
         run: |
-          # GN Install
           if (!(Test-Path "C:\tools\gn")) {
             New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
             Invoke-WebRequest "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" -OutFile gn.zip
@@ -94,13 +92,68 @@ jobs:
           }
           Add-Content $env:GITHUB_PATH "C:\tools\gn"
 
-          # NASM Install (Wichtig für ICU/Zlib)
           if (!(Get-Command nasm -ErrorAction SilentlyContinue)) {
             choco install nasm -y --no-progress
             $nasmPath = "C:\Program Files\NASM"
             if (Test-Path $nasmPath) { Add-Content $env:GITHUB_PATH $nasmPath }
           }
 
+      # -------------------------
+      # MSVC JUNCTION (Verhindert File Not Found)
+      # -------------------------
+      - name: MSVC Toolchain Junction
+        shell: pwsh
+        run: |
+          $msvcBase = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+          if (Test-Path $msvcBase) {
+            $actual = Get-ChildItem $msvcBase | Select-Object -First 1
+            $required = Join-Path $msvcBase "14.34.31933"
+            if (!(Test-Path $required)) {
+                New-Item -ItemType Junction -Path $required -Value $actual.FullName
+            }
+          }
+
+      # -------------------------
+      # BUILD STEPS
+      # -------------------------
+      - name: Download Resources
+        shell: pwsh
+        run: python download_resources.py
+
+      - name: GN Gen (win-win32)
+        shell: pwsh
+        run: |
+          # Korrigiert: win-win32 anstatt win32
+          python cobalt/build/gn.py -p win-win32 -c ${{ inputs.build_type }} -o out/win-win32
+
+      - name: Build (NINJA)
+        shell: pwsh
+        run: |
+          $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
+          $env:_CL_ = "/wd9025"
+          $env:PATH = "C:\Program Files\NASM;$env:PATH"
+          
+          ninja -C out/win-win32 cobalt_install -j $env:NUMBER_OF_PROCESSORS
+
+      # -------------------------
+      # ARTIFACTS
+      # -------------------------
+      - name: Upload Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobalt-win32-${{ inputs.build_type }}
+          path: out/win-win32/cobalt*
+
+      - name: Release Upload
+        if: inputs.upload_release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: out/win-win32/*.exe
+          file_glob: true
+          asset_name: cobalt-win32-${{ inputs.build_type }}.exe
+          tag: win32-build
+          overwrite: true
       # -------------------------
       # MSVC JUNCTION (Verhindert File Not Found)
       # -------------------------
