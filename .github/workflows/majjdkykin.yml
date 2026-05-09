@@ -48,10 +48,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install GN (if required)
-        shell: powershell
+      - name: Build GN from repo
+        shell: bash
         run: |
-          echo "GN assumed prebuilt or in repo tools"
+          cd third_party/gn
+          python build/gen.py
+          echo "$(pwd)/out" >> $GITHUB_PATH
 
       - name: Generate build files (GN)
         shell: bash
