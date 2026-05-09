@@ -34,19 +34,44 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Cache GN binary
+        id: cache-gn
+        uses: actions/cache@v4
+        with:
+          path: C:\tools\gn
+          key: gn-windows-amd64-latest
+
       - name: Install GN
+        if: steps.cache-gn.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "C:\tools\gn" | Out-Null
           Invoke-WebRequest -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" -OutFile "gn.zip"
           Expand-Archive -Path "gn.zip" -DestinationPath "C:\tools\gn" -Force
+
+      - name: Add GN to PATH
+        shell: pwsh
+        run: |
           echo "C:\tools\gn" | Out-File -FilePath $env:GITHUB_PATH -Append
 
+      - name: Cache NASM
+        id: cache-nasm
+        uses: actions/cache@v4
+        with:
+          path: C:\ProgramData\chocolatey\lib\nasm
+          key: nasm-choco-windows
+
       - name: Install build dependencies
+        if: steps.cache-nasm.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           choco install -y nasm
-          refreshenv
+
+      - name: Add NASM to PATH
+        shell: pwsh
+        run: |
+          $nasmPath = Get-ChildItem "C:\ProgramData\chocolatey\lib\nasm" -Recurse -Filter "nasm.exe" | Select-Object -First 1 -ExpandProperty DirectoryName
+          echo "$nasmPath" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Set Environment Variables
         shell: pwsh
@@ -65,6 +90,7 @@ jobs:
       - name: GN Gen
         shell: pwsh
         run: |
+          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
           gn gen ${{ env.OUTPUT_DIR }} `
             --args="target_platform=`"xb1`" target_os=`"winuwp`" target_cpu=`"x64`" build_type=`"${{ inputs.build_type }}`""
 
