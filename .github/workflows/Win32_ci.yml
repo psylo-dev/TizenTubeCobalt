@@ -18,10 +18,11 @@ on:
         default: false
         type: boolean
 
+
 jobs:
 
   # =========================
-  # WIN32 BUILD
+  # WIN32
   # =========================
   win32:
     runs-on: windows-2022
@@ -32,35 +33,78 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+      # -------------------------
+      # PYTHON VENV (CI BEST PRACTICE)
+      # -------------------------
+      - name: Create venv
+        shell: pwsh
+        run: py -3 -m venv .venv
 
-      - name: Install deps
+      - name: Install Python deps
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-      # FIX BISON
+      # -------------------------
+      # GN (FIXED)
+      # -------------------------
+      - name: Install GN
+        shell: pwsh
+        run: |
+          if (!(Test-Path "C:\tools\gn")) {
+            New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
+            Invoke-WebRequest `
+              "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" `
+              -OutFile gn.zip
+
+            Expand-Archive gn.zip C:\tools\gn -Force
+          }
+
+          echo "C:\tools\gn" >> $env:GITHUB_PATH
+          where.exe gn
+
+      # -------------------------
+      # FLEX / BISON FIX
+      # -------------------------
       - name: Install win_bison
         shell: pwsh
         run: |
           choco install winflexbison -y --no-progress
-          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
 
+          $paths = @(
+            "C:\ProgramData\chocolatey\bin",
+            "C:\ProgramData\chocolatey\lib\winflexbison\tools"
+          )
+
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Add-Content $env:GITHUB_PATH $p
+            }
+          }
+
+          where.exe win_bison
+
+      # -------------------------
+      # MSVC
+      # -------------------------
       - name: Setup MSVC
         shell: pwsh
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+
           cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
-            if ($_ -match "^([^=]+)=(.*)$") { Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])" }
+            if ($_ -match "^([^=]+)=(.*)$") {
+              Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])"
+            }
           }
 
+      # -------------------------
+      # BUILD WIN32
+      # -------------------------
       - name: GN gen win32
-        run: python cobalt/build/gn.py -p win32 -c ${{ inputs.build_type }} -o out/win32
+        run: .\.venv\Scripts\python.exe cobalt/build/gn.py -p win32 -c ${{ inputs.build_type }} -o out/win32
 
       - name: Build win32
         run: ninja -C out/win32 cobalt_install
@@ -69,11 +113,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: win32-build
-          path: out/win32/cobalt*
+          path: out/win32/**
 
 
   # =========================
-  # XB1 BUILD (PARALLEL)
+  # XB1
   # =========================
   xb1:
     runs-on: windows-2022
@@ -84,35 +128,78 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+      # -------------------------
+      # PYTHON VENV
+      # -------------------------
+      - name: Create venv
+        shell: pwsh
+        run: py -3 -m venv .venv
 
-      - name: Install deps
+      - name: Install Python deps
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-      # FIX BISON
+      # -------------------------
+      # GN FIX
+      # -------------------------
+      - name: Install GN
+        shell: pwsh
+        run: |
+          if (!(Test-Path "C:\tools\gn")) {
+            New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
+            Invoke-WebRequest `
+              "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" `
+              -OutFile gn.zip
+
+            Expand-Archive gn.zip C:\tools\gn -Force
+          }
+
+          echo "C:\tools\gn" >> $env:GITHUB_PATH
+          where.exe gn
+
+      # -------------------------
+      # FLEX / BISON
+      # -------------------------
       - name: Install win_bison
         shell: pwsh
         run: |
           choco install winflexbison -y --no-progress
-          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
 
+          $paths = @(
+            "C:\ProgramData\chocolatey\bin",
+            "C:\ProgramData\chocolatey\lib\winflexbison\tools"
+          )
+
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Add-Content $env:GITHUB_PATH $p
+            }
+          }
+
+          where.exe win_bison
+
+      # -------------------------
+      # MSVC
+      # -------------------------
       - name: Setup MSVC
         shell: pwsh
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+
           cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
-            if ($_ -match "^([^=]+)=(.*)$") { Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])" }
+            if ($_ -match "^([^=]+)=(.*)$") {
+              Add-Content $env:GITHUB_ENV "$($matches[1])=$($matches[2])"
+            }
           }
 
+      # -------------------------
+      # BUILD XB1
+      # -------------------------
       - name: GN gen xb1
-        run: python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o out/xb1
+        run: .\.venv\Scripts\python.exe cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o out/xb1
 
       - name: Build xb1
         run: ninja -C out/xb1 cobalt_install
@@ -121,11 +208,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xb1-build
-          path: out/xb1/cobalt*
+          path: out/xb1/**
 
 
   # =========================
-  # OPTIONAL RELEASE MERGE
+  # RELEASE MERGE
   # =========================
   release:
     needs: [win32, xb1]
@@ -147,7 +234,7 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: dist/**/*.exe
+          file: dist/**/*
           file_glob: true
           tag: multi-build
           overwrite: true
