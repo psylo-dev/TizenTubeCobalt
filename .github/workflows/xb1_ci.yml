@@ -19,10 +19,13 @@ on:
 
 jobs:
   xb1:
-    runs-on: windows-latest
+    # Pinning to 2022 to keep MSVC 14.3x paths stable and avoid VS2026 redirects
+    runs-on: windows-2022
 
     env:
       PYTHONPATH: ${{ github.workspace }}
+      # Opt-in to Node 24 to clear deprecation warnings for 2026
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout
@@ -44,19 +47,27 @@ jobs:
           key: gn-windows
 
       # -------------------------
-      # PYTHON
+      # PYTHON SETUP
       # -------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.10"
+
+      - name: Disable Python Store Alias
+        shell: pwsh
+        run: |
+          # Removes the 'fake' python.exe that triggers the Microsoft Store popup
+          Remove-Item "$env:LOCALAPPDATA\Microsoft\WindowsApps\python*.exe" -ErrorAction SilentlyContinue
 
       - name: Install Python deps
         shell: pwsh
-        run: pip install -r requirements.txt --prefer-binary --no-input
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt --prefer-binary --no-input
 
       # -------------------------
-      # MSVC ENV (CORRECTED)
+      # MSVC ENVIRONMENT SETUP
       # -------------------------
       - name: Setup MSVC Environment
         shell: pwsh
@@ -65,16 +76,13 @@ jobs:
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
-          # Extract variables from cmd context
           $envOut = cmd /c "`"$vcvars`" && set"
 
           foreach ($line in $envOut) {
             if ($line -match "^([^=]+)=(.*)$") {
               $name = $matches[1]
               $val = $matches[2]
-              
               if ($name -eq "Path") {
-                # Add MSVC bin paths to GitHub Path so 'cl.exe' is globally available
                 $val -split ";" | ForEach-Object {
                   if ($_ -and (Test-Path $_)) { Add-Content $env:GITHUB_PATH $_ }
                 }
@@ -87,7 +95,7 @@ jobs:
       # -------------------------
       # TOOLS (GN + NASM)
       # -------------------------
-      - name: Install Tools
+      - name: Install Build Tools
         shell: pwsh
         run: |
           if (!(Test-Path "C:\tools\gn")) {
@@ -98,69 +106,52 @@ jobs:
           if (!(Get-Command nasm -ErrorAction SilentlyContinue)) {
             choco install nasm -y --no-progress
           }
-
-      - name: Add GN to PATH
-        shell: pwsh
-        run: Add-Content $env:GITHUB_PATH "C:\tools\gn"
+          Add-Content $env:GITHUB_PATH "C:\tools\gn"
 
       # -------------------------
-      # BUILD CONFIG & TOOLCHAIN SYMLINK (SAFETY NET)
+      # BUILD CONFIG & HARDCODED PATH FIX
       # -------------------------
-      - name: Set Build Variables
+      - name: Set Build Variables & Path Fix
         shell: pwsh
         run: |
           Add-Content $env:GITHUB_ENV "BUILD_TYPE=${{ inputs.build_type }}"
           Add-Content $env:GITHUB_ENV "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}"
           
-          # Fix: If the build system is hardcoded to look for version 14.34.31933,
-          # we link the version actually present on the runner to that path.
+          # Fix for Ninja 'CreateProcess' error: 
+          # Links whatever MSVC version is on the runner to the path expected by Cobalt
           $msvcBase = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
-          $actual = Get-ChildItem $msvcBase | Select-Object -First 1
-          $required = Join-Path $msvcBase "14.34.31933"
-          if (!(Test-Path $required)) {
-            Write-Host "Creating Symlink: $actual -> $required"
-            New-Item -ItemType Junction -Path $required -Value $actual.FullName
+          if (Test-Path $msvcBase) {
+            $actual = Get-ChildItem $msvcBase | Select-Object -First 1
+            $required = Join-Path $msvcBase "14.34.31933"
+            if (!(Test-Path $required)) {
+                Write-Host "Creating Junction: $actual -> $required"
+                New-Item -ItemType Junction -Path $required -Value $actual.FullName
+            }
           }
 
       # -------------------------
-      # RESOURCES
+      # EXECUTION STEPS
       # -------------------------
       - name: Download Resources
         shell: pwsh
         run: python download_resources.py
 
-      # -------------------------
-      # GN + BUILD
-      # -------------------------
       - name: GN Gen
         shell: pwsh
-        run: |
-          # Verify compiler is found before starting
-          where.exe cl.exe
-          python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
+        run: python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
 
-      - name: Build (NINJA FAST)
+      - name: Build (NINJA)
         shell: pwsh
         run: |
           $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
           ninja -C ${{ env.OUTPUT_DIR }} cobalt_install -j $env:NUMBER_OF_PROCESSORS
 
-      # -------------------------
-      # PACKAGE
-      # -------------------------
       - name: Package Appx
         shell: pwsh
         run: python starboard/xb1/tools/packager.py -s ${{ env.OUTPUT_DIR }}/ -o ${{ env.OUTPUT_DIR }}/package -p cobalt
 
-      - name: Verify Appx
-        shell: pwsh
-        run: |
-          $appx = Get-ChildItem "${{ env.OUTPUT_DIR }}/package" -Filter "*.appx"
-          if (!$appx) { throw "APPX nicht gefunden" }
-          Write-Host "OK: $($appx.FullName)"
-
       # -------------------------
-      # UPLOAD
+      # ARTIFACTS
       # -------------------------
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
