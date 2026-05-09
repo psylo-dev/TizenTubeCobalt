@@ -48,12 +48,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Build GN from repo
+      - name: Install GN
         shell: bash
         run: |
-          cd third_party/gn
-          python build/gen.py
-          echo "$(pwd)/out" >> $GITHUB_PATH
+          mkdir -p toolsss
+          cd toolsss
+
+          curl -L -o gn.zip https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest
+          unzip gn.zip
+
+          echo "$(pwd)" >> $GITHUB_PATH
+          echo "GN installed"
 
       - name: Generate build files (GN)
         shell: bash
