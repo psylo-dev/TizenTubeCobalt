@@ -19,12 +19,10 @@ on:
 
 jobs:
   xb1:
-    # Pinning to 2022 to keep MSVC 14.3x paths stable and avoid VS2026 redirects
     runs-on: windows-2022
 
     env:
       PYTHONPATH: ${{ github.workspace }}
-      # Opt-in to Node 24 to clear deprecation warnings for 2026
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
@@ -56,9 +54,7 @@ jobs:
 
       - name: Disable Python Store Alias
         shell: pwsh
-        run: |
-          # Removes the 'fake' python.exe that triggers the Microsoft Store popup
-          Remove-Item "$env:LOCALAPPDATA\Microsoft\WindowsApps\python*.exe" -ErrorAction SilentlyContinue
+        run: Remove-Item "$env:LOCALAPPDATA\Microsoft\WindowsApps\python*.exe" -ErrorAction SilentlyContinue
 
       - name: Install Python deps
         shell: pwsh
@@ -74,18 +70,13 @@ jobs:
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
           $envOut = cmd /c "`"$vcvars`" && set"
-
           foreach ($line in $envOut) {
             if ($line -match "^([^=]+)=(.*)$") {
-              $name = $matches[1]
-              $val = $matches[2]
+              $name = $matches[1]; $val = $matches[2]
               if ($name -eq "Path") {
-                $val -split ";" | ForEach-Object {
-                  if ($_ -and (Test-Path $_)) { Add-Content $env:GITHUB_PATH $_ }
-                }
+                $val -split ";" | ForEach-Object { if ($_ -and (Test-Path $_)) { Add-Content $env:GITHUB_PATH $_ } }
               } else {
                 Add-Content $env:GITHUB_ENV "$name=$val"
               }
@@ -93,38 +84,41 @@ jobs:
           }
 
       # -------------------------
-      # TOOLS (GN + NASM)
+      # TOOLS (GN + NASM FIXED)
       # -------------------------
       - name: Install Build Tools
         shell: pwsh
         run: |
+          # Install GN
           if (!(Test-Path "C:\tools\gn")) {
             New-Item -ItemType Directory -Force C:\tools\gn | Out-Null
             Invoke-WebRequest "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" -OutFile gn.zip
             Expand-Archive gn.zip C:\tools\gn -Force
           }
-          if (!(Get-Command nasm -ErrorAction SilentlyContinue)) {
-            choco install nasm -y --no-progress
-          }
           Add-Content $env:GITHUB_PATH "C:\tools\gn"
 
+          # Install NASM and force refresh PATH
+          if (!(Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm -y --no-progress
+            $nasmPath = "C:\Program Files\NASM"
+            if (Test-Path $nasmPath) {
+              Add-Content $env:GITHUB_PATH $nasmPath
+            }
+          }
+
       # -------------------------
-      # BUILD CONFIG & HARDCODED PATH FIX
+      # BUILD CONFIG & JUNCTION FIX
       # -------------------------
       - name: Set Build Variables & Path Fix
         shell: pwsh
         run: |
           Add-Content $env:GITHUB_ENV "BUILD_TYPE=${{ inputs.build_type }}"
           Add-Content $env:GITHUB_ENV "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}"
-          
-          # Fix for Ninja 'CreateProcess' error: 
-          # Links whatever MSVC version is on the runner to the path expected by Cobalt
           $msvcBase = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
           if (Test-Path $msvcBase) {
             $actual = Get-ChildItem $msvcBase | Select-Object -First 1
             $required = Join-Path $msvcBase "14.34.31933"
             if (!(Test-Path $required)) {
-                Write-Host "Creating Junction: $actual -> $required"
                 New-Item -ItemType Junction -Path $required -Value $actual.FullName
             }
           }
@@ -138,30 +132,28 @@ jobs:
 
       - name: GN Gen
         shell: pwsh
-        run: python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
+        run: |
+          # Final tool check
+          where.exe nasm
+          python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
 
       - name: Build (NINJA)
         shell: pwsh
         run: |
           $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
-          # This environment variable is picked up by cl.exe automatically
-          $env:_CL_ = "/wd9025" 
+          # Hide the O1/O2 override warnings
+          $env:_CL_ = "/wd9025"
+          # Ensure current shell session sees nasm
+          $env:PATH = "C:\Program Files\NASM;$env:PATH"
           ninja -C ${{ env.OUTPUT_DIR }} cobalt_install -j $env:NUMBER_OF_PROCESSORS
 
-
-      - name: Build (NINJA)
-        shell: pwsh
-        run: |
-          $env:NINJA_STATUS='[%e sec | %f/%t | %r]'
-          ninja -C ${{ env.OUTPUT_DIR }} cobalt_install -j $env:NUMBER_OF_PROCESSORS
-
+      # -------------------------
+      # PACKAGE & UPLOAD
+      # -------------------------
       - name: Package Appx
         shell: pwsh
         run: python starboard/xb1/tools/packager.py -s ${{ env.OUTPUT_DIR }}/ -o ${{ env.OUTPUT_DIR }}/package -p cobalt
 
-      # -------------------------
-      # ARTIFACTS
-      # -------------------------
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
