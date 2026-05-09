@@ -1,4 +1,4 @@
-name: xbox
+name: xbox2
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
 jobs:
   xb1:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - name: Checkout
@@ -38,30 +38,33 @@ jobs:
       - name: Install required MSVC and Windows SDK versions
         shell: pwsh
         run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          \( vsWhere = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          \( vsInstaller = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
           $vsPath = & $vsWhere -latest -products * -property installationPath
-          Write-Host "VS Installation: $vsPath"
+          Write-Host "VS Installation Path: $vsPath"
 
           $components = @(
             "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
             "Microsoft.VisualStudio.Component.VC.14.34.17.4.x86.x64",
-            "Microsoft.VisualStudio.Component.Windows10SDK.18362",
-            "Microsoft.VisualStudio.Component.Windows10SDK.19041",
-            "Microsoft.VisualStudio.Component.Windows10SDK.20348",
-            "Microsoft.VisualStudio.Component.Windows11SDK.22000",
+            "Microsoft.VisualStudio.Component.Windows11SDK.26100",      # Haupt-SDK (neu)
+            "Microsoft.VisualStudio.Component.Windows11SDK.22621",      # Fallback
             "Microsoft.VisualStudio.ComponentGroup.UWP.VC",
             "Microsoft.VisualStudio.Component.VC.ATL"
           )
 
           $addArgs = ($components | ForEach-Object { "--add $_" }) -join " "
-          $proc = Start-Process -FilePath $vsInstaller -ArgumentList "modify --installPath `"$vsPath`" $addArgs --quiet --norestart" -Wait -PassThru
+          Write-Host "Installiere Komponenten: $addArgs"
+
+          $proc = Start-Process -FilePath $vsInstaller `
+            -ArgumentList "modify --installPath `"$vsPath`" $addArgs --quiet --norestart --wait" `
+            -Wait -PassThru
+
           Write-Host "VS Installer Exit Code: $($proc.ExitCode)"
 
-          Write-Host "Installierte MSVC Versionen:"
+          Write-Host "=== Installierte MSVC Versionen ==="
           Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Select-Object Name
 
-          Write-Host "Installierte Windows SDKs:"
+          Write-Host "=== Installierte Windows SDKs ==="
           Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\include" -Directory | Select-Object Name
 
       - name: Setup MSBuild
@@ -70,43 +73,44 @@ jobs:
       - name: Setup MSVC environment
         shell: pwsh
         run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          \( vsWhere = " \){env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          Write-Host "VS gefunden: $vsPath"
+          Write-Host "VS Path: $vsPath"
 
-          # MSVC 14.34 bevorzugen, sonst neueste nehmen
-          $msvc1434 = "$vsPath\VC\Tools\MSVC\14.34.31933"
-          if (Test-Path $msvc1434) {
-            Write-Host "MSVC 14.34.31933 gefunden"
+          # MSVC 14.34 bevorzugen
+          $msvcPath = "$vsPath\VC\Tools\MSVC\14.34.31933"
+          if (Test-Path $msvcPath) {
+            Write-Host "MSVC 14.34 gefunden"
             Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=14.34.31933"
           } else {
-            $latest = (Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
-            Write-Host "MSVC 14.34 nicht gefunden, verwende: $latest"
-            Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=$latest"
+            $latestMSVC = (Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
+            Write-Host "Verwende neueste MSVC: $latestMSVC"
+            Add-Content -Path $env:GITHUB_ENV -Value "VCToolsVersion=$latestMSVC"
           }
 
-          # SDK 18362 bevorzugen, sonst neueste nehmen
-          $preferredSdk = "10.0.18362.0"
+          # Neue SDK als Standard
+          $preferredSdk = "10.0.26100.0"
           if (Test-Path "C:\Program Files (x86)\Windows Kits\10\include\$preferredSdk") {
-            Write-Host "SDK $preferredSdk gefunden"
+            Write-Host "SDK $preferredSdk gefunden und wird verwendet"
             Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$preferredSdk"
           } else {
             $latestSdk = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\include" -Directory |
-              Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+              Where-Object { \( _.Name -match '^\d+\.\d+\.\d+\.\d+ \)' } |
               Sort-Object Name -Descending | Select-Object -First 1).Name
-            Write-Host "SDK $preferredSdk nicht gefunden, verwende: $latestSdk"
+            Write-Host "SDK $preferredSdk nicht gefunden. Verwende: $latestSdk"
             Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$latestSdk"
           }
 
-          # vcvars64 initialisieren und alle Env-Vars exportieren
+          # vcvars64 ausführen und Environment exportieren
           $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
           $envOutput = cmd /c "`"$vcvars`" && set"
           foreach ($line in $envOutput) {
-            if ($line -match '^([^=]+)=(.*)$') {
-              Add-Content -Path $env:GITHUB_ENV -Value "$($matches[1])=$($matches[2])"
+            if (\( line -match '^([^=]+)=(.*) \)') {
+              [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
+              Add-Content -Path \( env:GITHUB_ENV -Value " \)(\( matches[1])= \)($matches[2])"
             }
           }
-          Write-Host "MSVC Umgebung exportiert"
+          Write-Host "MSVC + SDK Umgebung erfolgreich exportiert"
 
       - name: Cache GN binary
         id: cache-gn
@@ -148,60 +152,52 @@ jobs:
       - name: Set Environment Variables
         shell: pwsh
         run: |
-          Add-Content -Path $env:GITHUB_ENV -Value "BUILD_TYPE=${{ inputs.build_type }}"
-          Add-Content -Path $env:GITHUB_ENV -Value "OUTPUT_DIR=out/xb1_${{ inputs.build_type }}"
+          Add-Content -Path \( env:GITHUB_ENV -Value "BUILD_TYPE= \){{ inputs.build_type }}"
+          Add-Content -Path \( env:GITHUB_ENV -Value "OUTPUT_DIR=out/xb1_ \){{ inputs.build_type }}"
 
       - name: Fix ucrtbased.dll path (debug only)
         if: inputs.build_type == 'debug'
         shell: pwsh
         run: |
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
-            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+            Where-Object { \( _.Name -match '^\d+\.\d+\.\d+\.\d+ \)' } |
             Sort-Object Name -Descending | Select-Object -First 1).Name
           $src = "C:\Program Files (x86)\Windows Kits\10\bin\$sdkVer\x64\ucrt\ucrtbased.dll"
           $dst = "C:\Program Files (x86)\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.UniversalCRT.Debug\$sdkVer\Redist\Debug\x64\ucrtbased.dll"
           New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
           Copy-Item -Path $src -Destination $dst -Force
-          Write-Host "Kopiert: $src -> $dst"
+          Write-Host "ucrtbased.dll für Debug-Build kopiert"
 
       - name: Download resources
         shell: pwsh
         run: |
-          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH"
           python download_resources.py
-
-      - name: Cache Ninja build output
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.OUTPUT_DIR }}
-          key: ninja-xb1-${{ inputs.build_type }}-${{ hashFiles('**/*.gn', '**/*.gni', 'DEPS') }}
-          restore-keys: |
-            ninja-xb1-${{ inputs.build_type }}-
 
       - name: GN Gen
         shell: pwsh
         run: |
-          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH"
           python cobalt/build/gn.py -p xb1 -c ${{ inputs.build_type }} -o ${{ env.OUTPUT_DIR }}
           gn check ${{ env.OUTPUT_DIR }}
 
       - name: Build Cobalt
         shell: pwsh
         run: |
-          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH"
           $env:NINJA_STATUS = '[%e sec | %f/%t %u remaining | %c/sec | j%r] '
           ninja -C ${{ env.OUTPUT_DIR }} cobalt_install
 
       - name: Package Appx
         shell: pwsh
         run: |
-          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          \( env:PYTHONPATH = " \){{ github.workspace }};$env:PYTHONPATH"
           python starboard/xb1/tools/packager.py -s ${{ env.OUTPUT_DIR }}/ -o ${{ env.OUTPUT_DIR }}/package -p cobalt
 
       - name: Verify Appx exists
         shell: pwsh
         run: |
-          $appx = Get-ChildItem -Path "${{ env.OUTPUT_DIR }}/package" -Filter "*.appx" -ErrorAction SilentlyContinue
+          \( appx = Get-ChildItem -Path " \){{ env.OUTPUT_DIR }}/package" -Filter "*.appx" -ErrorAction SilentlyContinue
           if (-not $appx) {
             Write-Error "Kein .appx gefunden in ${{ env.OUTPUT_DIR }}/package"
             exit 1
