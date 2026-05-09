@@ -1,34 +1,22 @@
-name: Cobalt Dual-Platform Build (Xbox & Win)
+name: windows_release
 
 on:
   push:
     tags:
       - 'v*'
+
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: cobalt-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  build:
-    name: Build ${{ matrix.platform }}
+
+  # ============================================================
+  # win-win32  (x86 Desktop — starboard/win/)
+  # ============================================================
+  win-win32:
     runs-on: windows-2022
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: xb1
-            config: devel
-            artifact: Cobalt-Xbox-One
-
-          - platform: win-win32
-            config: devel
-            artifact: Cobalt-Win32
 
     env:
       DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
@@ -36,30 +24,25 @@ jobs:
       PYTHONUTF8: "1"
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------------
-      - name: Checkout Repository
+
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          path: src
           fetch-depth: 1
           submodules: recursive
 
-      # ------------------------------------------------------------
-      # Depot Tools Cache
-      # ------------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Cache depot_tools
-        id: cache-depot-tools
         uses: actions/cache@v4
         with:
           path: depot_tools
-          key: windows-depot-tools-v1
+          key: depot-tools-win-v1
 
-      # ------------------------------------------------------------
-      # Install Dependencies
-      # ------------------------------------------------------------
-      - name: Setup Build Environment
+      - name: Setup Environment
         shell: pwsh
         run: |
           choco install ninja winflexbison3 -y
@@ -68,117 +51,214 @@ jobs:
             git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
           }
 
-          "$pwd\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$pwd\depot_tools" | Out-File `
+            -FilePath $env:GITHUB_PATH `
+            -Encoding utf8 `
+            -Append
 
-      # ------------------------------------------------------------
-      # Python Setup
-      # ------------------------------------------------------------
+      - name: Configure Git
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.filemode false
+          git config --global core.fscache true
+          git config --global core.preloadindex true
+
+      - name: Install GN
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" `
+            -OutFile gn.zip
+          Expand-Archive -Path gn.zip -DestinationPath gn_bin -Force
+          Move-Item -Path gn_bin\gn.exe -Destination "$env:SystemRoot\System32\gn.exe" -Force
+
+      - name: Set PYTHONPATH
+        shell: pwsh
+        run: |
+          "PYTHONPATH=$env:GITHUB_WORKSPACE" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
+
+      - name: GN
+        shell: pwsh
+        run: |
+          gn gen out/win-win32_gold `
+            --args='target_platform="win-win32" build_type="gold"'
+          gn check out/win-win32_gold
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $env:NINJA_STATUS = "[%e sec | %f/%t %u remaining | %c/sec | j%r] "
+          ninja -C out/win-win32_gold cobalt -j 4
+
+      # Filtert obj/, gen/, .ninja-Dateien und toolchain/ heraus.
+      # Behält .exe, .dll, content/-Assets und .pdb.
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Get-ChildItem out/win-win32_gold `
+            -Exclude obj,gen,*.ninja,*.ninja_deps,*.ninja_log,toolchain `
+            | Compress-Archive `
+              -DestinationPath out/TizenTubeCobalt-Win32.zip `
+              -Force
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TizenTubeCobalt-Win32
+          path: out/TizenTubeCobalt-Win32.zip
+          compression-level: 0
+
+  # ============================================================
+  # xb1  (Xbox One UWP AppX — starboard/xb1/)
+  # ============================================================
+  xb1:
+    runs-on: windows-2022
+
+    env:
+      DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
+      GYP_MSVS_VERSION: "2022"
+      PYTHONUTF8: "1"
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ------------------------------------------------------------
-      # GClient Sync
-      # ------------------------------------------------------------
-      - name: Configure gclient
+      - name: Cache depot_tools
+        uses: actions/cache@v4
+        with:
+          path: depot_tools
+          key: depot-tools-win-v1
+
+      - name: Setup Environment
         shell: pwsh
-        working-directory: src
         run: |
-          gclient config --name src `
-            --unmanaged `
-            "${{ github.server_url }}/${{ github.repository }}.git"
+          choco install ninja winflexbison3 -y
 
-      - name: Sync Dependencies
-        shell: pwsh
-        working-directory: src
-        run: |
-          gclient sync `
-            --force `
-            --with_branch_heads `
-            --with_tags `
-            --shallow `
-            --no-history
-
-      # ------------------------------------------------------------
-      # Generate Build Files
-      # ------------------------------------------------------------
-      - name: Generate GN Files
-        shell: pwsh
-        working-directory: src
-        run: |
-          python cobalt/build/gn.py `
-            -p ${{ matrix.platform }} `
-            -c ${{ matrix.config }}
-
-      # ------------------------------------------------------------
-      # Build
-      # ------------------------------------------------------------
-      - name: Build Cobalt
-        shell: pwsh
-        working-directory: src
-        run: |
-          ninja `
-            -C out/${{ matrix.platform }}_${{ matrix.config }} `
-            cobalt `
-            -j 4
-
-      # ------------------------------------------------------------
-      # Package
-      # ------------------------------------------------------------
-      - name: Package Build
-        shell: pwsh
-        working-directory: src
-        run: |
-          New-Item -ItemType Directory -Force -Path out/final_package | Out-Null
-
-          if ("${{ matrix.platform }}" -eq "xb1") {
-
-            python starboard/xb1/tools/packager.py `
-              -s out/xb1_devel `
-              -o out/final_package `
-              -p cobalt
-
-          } else {
-
-            Copy-Item `
-              -Path out/win-win32_devel/* `
-              -Destination out/final_package `
-              -Recurse `
-              -Force
-
+          if (!(Test-Path "depot_tools")) {
+            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
           }
 
-      # ------------------------------------------------------------
-      # Compress Artifact
-      # ------------------------------------------------------------
+          "$pwd\depot_tools" | Out-File `
+            -FilePath $env:GITHUB_PATH `
+            -Encoding utf8 `
+            -Append
+
+      - name: Configure Git
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.filemode false
+          git config --global core.fscache true
+          git config --global core.preloadindex true
+
+      - name: Install GN
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest" `
+            -OutFile gn.zip
+          Expand-Archive -Path gn.zip -DestinationPath gn_bin -Force
+          Move-Item -Path gn_bin\gn.exe -Destination "$env:SystemRoot\System32\gn.exe" -Force
+
+      - name: Set PYTHONPATH
+        shell: pwsh
+        run: |
+          "PYTHONPATH=$env:GITHUB_WORKSPACE" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
+
+      - name: GN
+        shell: pwsh
+        run: |
+          gn gen out/xb1_gold `
+            --args='target_platform="xb1" build_type="gold"'
+          gn check out/xb1_gold
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $env:NINJA_STATUS = "[%e sec | %f/%t %u remaining | %c/sec | j%r] "
+          ninja -C out/xb1_gold cobalt_install -j 4
+
+      # packager.py erzeugt cobalt.appx, cobalt.appxsym, cobalt.appxupload.
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out/xb1_package | Out-Null
+          python starboard/xb1/tools/packager.py `
+            -s out/xb1_gold `
+            -o out/xb1_package `
+            -p cobalt
+
+      # ZIP enthält: cobalt.appx (sideloadbar), cobalt.appxsym (Symbole),
+      # cobalt.appxupload (Store), plus alle DLLs aus dem Build-Verzeichnis.
       - name: Create ZIP
         shell: pwsh
-        working-directory: src
         run: |
+          New-Item -ItemType Directory -Force -Path out/xb1_zip_staging | Out-Null
+
+          # Packager-Output: .appx, .appxsym, .appxupload
+          Copy-Item -Path out/xb1_package/* `
+            -Destination out/xb1_zip_staging -Force
+
+          # DLLs und sonstige Laufzeit-Binaries aus dem Build-Verzeichnis
+          Get-ChildItem out/xb1_gold `
+            -Exclude obj,gen,*.ninja,*.ninja_deps,*.ninja_log,toolchain,appx `
+            | Copy-Item -Destination out/xb1_zip_staging -Force
+
           Compress-Archive `
-            -Path out/final_package/* `
-            -DestinationPath out/${{ matrix.artifact }}.zip `
+            -Path out/xb1_zip_staging/* `
+            -DestinationPath out/TizenTubeCobalt-Xbox-One.zip `
             -Force
 
-      # ------------------------------------------------------------
-      # Upload Artifact
-      # ------------------------------------------------------------
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: src/out/${{ matrix.artifact }}.zip
+          name: TizenTubeCobalt-Xbox-One
+          path: out/TizenTubeCobalt-Xbox-One.zip
           compression-level: 0
 
-      # ------------------------------------------------------------
-      # GitHub Release Upload
-      # ------------------------------------------------------------
-      - name: Upload Release Asset
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  # ============================================================
+  # Release — wartet auf beide Builds, uploaded beide ZIPs
+  # ============================================================
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [win-win32, xb1]
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Download Win32 artifact
+        uses: actions/download-artifact@v4
         with:
-          files: |
-            src/out/${{ matrix.artifact }}.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: TizenTubeCobalt-Win32
+          path: dist
+
+      - name: Download Xbox artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: TizenTubeCobalt-Xbox-One
+          path: dist
+
+      - name: Upload Release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/*.zip
+          file_glob: true
+          tag: ${{ github.ref_name }}
+          overwrite: true
