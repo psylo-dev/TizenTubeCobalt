@@ -39,6 +39,26 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Setup MSVC environment
+        shell: pwsh
+        run: |
+          # Finde die tatsächlich installierte VS-Version dynamisch
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Write-Host "VS gefunden: $vsPath"
+
+          # Initialisiere vcvars64 und exportiere alle Env-Vars für folgende Steps
+          $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
+          $envOutput = cmd /c "`"$vcvars`" && set"
+          foreach ($line in $envOutput) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              $name = $matches[1]
+              $value = $matches[2]
+              echo "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+          Write-Host "MSVC Umgebung exportiert"
+
       - name: Cache GN binary
         id: cache-gn
         uses: actions/cache@v4
@@ -89,19 +109,83 @@ jobs:
         if: inputs.build_type == 'debug'
         shell: pwsh
         run: |
-          # ucrtbased.dll liegt im SDK bin-Ordner, Ninja erwartet sie aber
-          # unter dem ExtensionSDKs-Pfad — wir kopieren sie dorthin
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
             Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
             Sort-Object Name -Descending | Select-Object -First 1).Name
-
           $src = "C:\Program Files (x86)\Windows Kits\10\bin\$sdkVer\x64\ucrt\ucrtbased.dll"
           $dst = "C:\Program Files (x86)\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.UniversalCRT.Debug\$sdkVer\Redist\Debug\x64\ucrtbased.dll"
-
           New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
           Copy-Item -Path $src -Destination $dst -Force
-          Write-Host "Kopiert von: $src"
-          Write-Host "Kopiert nach: $dst"
+          Write-Host "ucrtbased.dll kopiert: $src -> $dst"
+
+      - name: Download resources
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          python download_resources.py
+
+      - name: Cache Ninja build output
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OUTPUT_DIR }}
+          key: ninja-xb1-${{ inputs.build_type }}-${{ hashFiles('**/*.gn', '**/*.gni', 'DEPS') }}
+          restore-keys: |
+            ninja-xb1-${{ inputs.build_type }}-
+
+      - name: GN Gen
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          python cobalt/build/gn.py `
+            -p xb1 `
+            -c ${{ inputs.build_type }} `
+            -o ${{ env.OUTPUT_DIR }}
+          gn check ${{ env.OUTPUT_DIR }}
+
+      - name: Build Cobalt
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          $env:NINJA_STATUS = "[%e sec | %f/%t %u remaining | %c/sec | j%r] "
+          ninja -C ${{ env.OUTPUT_DIR }} cobalt_install
+
+      - name: Package Appx
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "${{ github.workspace }};$env:PYTHONPATH"
+          python starboard/xb1/tools/packager.py `
+            -s ${{ env.OUTPUT_DIR }}/ `
+            -o ${{ env.OUTPUT_DIR }}/package `
+            -p cobalt
+
+      - name: Verify Appx exists
+        shell: pwsh
+        run: |
+          $appx = Get-ChildItem -Path "${{ env.OUTPUT_DIR }}/package" -Filter "*.appx" -ErrorAction SilentlyContinue
+          if (-not $appx) {
+            Write-Error "Kein .appx gefunden in ${{ env.OUTPUT_DIR }}/package"
+            exit 1
+          }
+          Write-Host "Gefunden: $($appx.FullName)"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobalt-xb1-${{ inputs.build_type }}
+          path: |
+            ${{ env.OUTPUT_DIR }}/cobalt*
+            ${{ env.OUTPUT_DIR }}/package/**/*
+
+      - name: Upload to GitHub Release
+        if: inputs.upload_release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.OUTPUT_DIR }}/package/*.appx
+          file_glob: true
+          asset_name: cobalt-xb1-${{ inputs.build_type }}.appx
+          tag: ${{ github.ref_type == 'tag' && github.ref_name || 'manual-build' }}
+          overwrite: true          Write-Host "Kopiert nach: $dst"
 
       - name: Download resources
         shell: pwsh
