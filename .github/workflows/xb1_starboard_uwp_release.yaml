@@ -19,6 +19,7 @@ jobs:
     env:
       GYP_MSVS_VERSION: "2022"
       PYTHONUTF8: "1"
+      DEPOT_TOOLS_WIN_TOOLCHAIN: "0" # Zwingt das Build-System, das System-VS (Enterprise) zu suchen
 
     steps:
       - name: Checkout
@@ -57,10 +58,8 @@ jobs:
       - name: GN
         shell: pwsh
         run: |
-          # Saubere Methode für den Unix-Timestamp in PowerShell
           $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           
-          # Erweitere Args analog zu Android (mit target_os und target_cpu)
           gn gen out/win-win32_gold `
             --args="target_platform=`"win-win32`" target_os=`"win32`" target_cpu=`"x86`" build_type=`"gold`" sb_api_version=15 build_timestamp=$timestamp"
           
@@ -95,6 +94,7 @@ jobs:
     env:
       GYP_MSVS_VERSION: "2022"
       PYTHONUTF8: "1"
+      DEPOT_TOOLS_WIN_TOOLCHAIN: "0" # Zwingt das Build-System, das System-VS (Enterprise) zu suchen
 
     steps:
       - name: Checkout
@@ -133,10 +133,8 @@ jobs:
       - name: GN
         shell: pwsh
         run: |
-          # Saubere Methode für den Unix-Timestamp in PowerShell
           $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
-          # Xbox nutzt x64 Architektur
           gn gen out/xb1_gold `
             --args="target_platform=`"xb1`" target_os=`"xboxone`" target_cpu=`"x64`" build_type=`"gold`" sb_api_version=15 build_timestamp=$timestamp"
           
@@ -203,3 +201,4 @@ jobs:
           file_glob: true
           tag: ${{ github.ref_name }}
           overwrite: true
+
